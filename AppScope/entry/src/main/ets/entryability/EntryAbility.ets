@@ -27,5 +27,9 @@ export default class EntryAbility extends UIAbility {
   }
 
   onBackground(): void {
+    const currentItem = GlobalContext.getPlayerService().getCurrentItem();
+    if (currentItem) {
+      GlobalContext.getStorageService().savePlayHistory(currentItem);
+    }
   }
 }
