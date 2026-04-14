@@ -1,0 +1,48 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "Player Sirius"
+    },
+    {
+      "name": "module_desc",
+      "value": "Player Sirius 播放器主模块"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "主入口"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Player Sirius"
+    },
+    {
+      "name": "permission_read_media_reason",
+      "value": "需要访问您的媒体文件"
+    },
+    {
+      "name": "permission_internet_reason",
+      "value": "需要访问网络播放在线视频"
+    },
+    {
+      "name": "page_title",
+      "value": "Player Sirius"
+    },
+    {
+      "name": "select_video",
+      "value": "选择视频"
+    },
+    {
+      "name": "play",
+      "value": "播放"
+    },
+    {
+      "name": "pause",
+      "value": "暂停"
+    },
+    {
+      "name": "stop",
+      "value": "停止"
+    }
+  ]
+}

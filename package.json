@@ -1,0 +1,13 @@
+{
+  "name": "player_sirius",
+  "version": "1.0.0",
+  "description": "HarmonyOS 全功能播放器",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {},
+  "devDependencies": {
+    "@ohos/hvigor": "latest",
+    "@ohos/hvigor-ohos-plugin": "latest"
+  }
+}
