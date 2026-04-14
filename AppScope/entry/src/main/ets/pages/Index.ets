@@ -62,6 +62,7 @@ struct Index {
   @State gestureHint: string = '';
   @State playerKernelMode: string = 'video-component';
   @State avPlayerSurfaceId: string = '';
+  @State videoSessionKey: number = 0;
   private playerService: PlayerService = GlobalContext.getPlayerService();
   private avPlayerService = GlobalContext.getAVPlayerService();
   private playerKernelService: PlayerKernelService = GlobalContext.getPlayerKernelService();
@@ -84,6 +85,8 @@ struct Index {
     this.currentMediaItem = this.playerService.getCurrentItem();
     this.currentSpeed = this.playerService.getSpeed();
     this.playerVolume = this.playerService.getVolume();
+    this.avPlayerService.setSpeed(this.currentSpeed);
+    this.avPlayerService.setVolume(this.playerVolume);
     this.updatePlaylist();
   }
 
@@ -213,6 +216,7 @@ struct Index {
     const nextVolume = Math.max(0, Math.min(this.playerVolume + delta, 1));
     this.playerVolume = nextVolume;
     this.playerService.setVolume(nextVolume);
+    this.avPlayerService.setVolume(nextVolume);
     this.gestureHint = `音量 ${Math.round(nextVolume * 100)}%`;
   }
 
@@ -402,6 +406,8 @@ struct Index {
       this.isLoading = true;
       await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
       await this.avPlayerService.open(playable.uri, true);
+    } else if (!this.isUsingAVPlayer()) {
+      this.videoSessionKey++;
     }
   }
 
@@ -504,39 +510,53 @@ struct Index {
     await this.requestOpenItem(item);
   }
 
-  private playFromPlaylist(index: number): void {
-    this.persistCurrentItem();
-    const item = this.playerService.selectByIndex(index);
-    if (item) {
-      this.currentMediaItem = item;
-      this.currentTime = item.lastPosition;
-      this.duration = item.duration;
-      this.resetPlaybackFlags();
+  private async activatePlaylistItem(item: MediaItem | null): Promise<void> {
+    if (!item) {
+      this.updatePlaylist();
+      return;
     }
+
+    this.currentMediaItem = item;
+    this.currentTime = item.lastPosition;
+    this.duration = item.duration;
+    this.networkUrl = item.sourceType === 'network' ? item.uri : this.networkUrl;
+    this.resetPlaybackFlags();
+    await this.storageService.savePlayHistory(item);
+    this.updatePlaylist();
+    await this.loadCollections();
+    if (this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
+      this.isLoading = true;
+      await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
+      await this.avPlayerService.open(item.uri, true);
+    } else if (!this.isUsingAVPlayer()) {
+      this.videoSessionKey++;
+    }
+  }
+
+  private async playFromPlaylist(index: number): Promise<void> {
+    this.persistCurrentItem();
+    this.stopCurrentPlaybackForSwitch();
+    const item = this.playerService.selectByIndex(index);
+    await this.activatePlaylistItem(item);
     this.showPlaylist = false;
   }
 
-  private playNext(): void {
+  private async playNext(): Promise<void> {
     this.persistCurrentItem();
-    this.currentMediaItem = this.playerService.playNext();
-    this.currentTime = this.currentMediaItem?.lastPosition ?? 0;
-    this.duration = this.currentMediaItem?.duration ?? 0;
-    this.resetPlaybackFlags();
-    this.updatePlaylist();
+    this.stopCurrentPlaybackForSwitch();
+    await this.activatePlaylistItem(this.playerService.playNext());
   }
 
-  private playPrevious(): void {
+  private async playPrevious(): Promise<void> {
     this.persistCurrentItem();
-    this.currentMediaItem = this.playerService.playPrevious();
-    this.currentTime = this.currentMediaItem?.lastPosition ?? 0;
-    this.duration = this.currentMediaItem?.duration ?? 0;
-    this.resetPlaybackFlags();
-    this.updatePlaylist();
+    this.stopCurrentPlaybackForSwitch();
+    await this.activatePlaylistItem(this.playerService.playPrevious());
   }
 
   private changeSpeed(speed: number): void {
     this.currentSpeed = speed;
     this.playerService.setSpeed(speed);
+    this.avPlayerService.setSpeed(speed);
     this.showSpeedPicker = false;
   }
 
@@ -641,6 +661,8 @@ struct Index {
     this.resetPlaybackFlags();
     if (this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
       this.avPlayerService.open(this.currentMediaItem.uri, true);
+    } else if (!this.isUsingAVPlayer()) {
+      this.videoSessionKey++;
     }
   }
 
@@ -751,63 +773,66 @@ struct Index {
                 this.onAVPlayerSurfaceLoad();
               });
           } else {
-            Video({
-              src: this.currentMediaItem.uri,
-              currentProgressRate: this.currentSpeed,
-              previewUri: '',
-              controller: this.videoController
-            })
-              .width('100%')
-              .height(this.isLandscapeMode ? 420 : 300)
-              .autoPlay(true)
-              .controls(false)
-              .objectFit(this.getObjectFitMode())
-              .rotate({ angle: this.videoRotation })
-              .onPrepared((duration: number) => {
-                this.duration = duration;
-                this.isPrepared = true;
-                this.isLoading = false;
-                if (this.currentMediaItem) {
-                  this.currentMediaItem.duration = duration;
-                  this.currentMediaItem.isCompleted = false;
-                }
-                if (this.currentTime > 0) {
-                  this.currentTime = Math.min(this.currentTime, duration);
-                  this.videoController.setCurrentTime(this.currentTime, SeekMode.Accurate);
-                }
+            ForEach([this.videoSessionKey], (_sessionKey: number) => {
+              Video({
+                src: this.currentMediaItem.uri,
+                currentProgressRate: this.currentSpeed,
+                previewUri: '',
+                controller: this.videoController
               })
-              .onUpdate((time: number) => {
-                if (!this.isDraggingProgress) {
-                  this.currentTime = time;
-                  this.syncCurrentItemProgress();
-                }
-              })
-              .onStart(() => {
-                this.isPlaying = true;
-                this.isLoading = false;
-                this.markCurrentPlaySession();
-              })
-              .onPause(() => {
-                this.isPlaying = false;
-                this.persistCurrentItem();
-              })
-              .onFinish(() => {
-                this.isPlaying = false;
-                this.isCompleted = true;
-                this.currentTime = 0;
-                if (this.currentMediaItem) {
-                  this.currentMediaItem.lastPosition = 0;
-                  this.currentMediaItem.isCompleted = true;
-                  this.currentMediaItem.lastPlayedAt = Date.now();
-                }
-                this.persistCurrentItem();
-              })
-              .onError(() => {
-                const networkMessage = this.currentMediaItem?.sourceType === 'network'
-                  ? '网络播放失败，请检查链接是否有效、网络是否较弱，或稍后重试。'
-                  : '视频播放失败，可能是文件不可访问或格式暂不支持。';
-                this.handlePlaybackFailure(networkMessage);
-              });
+                .width('100%')
+                .height(this.isLandscapeMode ? 420 : 300)
+                .autoPlay(true)
+                .controls(false)
+                .muted(this.playerVolume <= 0)
+                .objectFit(this.getObjectFitMode())
+                .rotate({ angle: this.videoRotation })
+                .onPrepared((duration: number) => {
+                  this.duration = duration;
+                  this.isPrepared = true;
+                  this.isLoading = false;
+                  if (this.currentMediaItem) {
+                    this.currentMediaItem.duration = duration;
+                    this.currentMediaItem.isCompleted = false;
+                  }
+                  if (this.currentTime > 0) {
+                    this.currentTime = Math.min(this.currentTime, duration);
+                    this.videoController.setCurrentTime(this.currentTime, SeekMode.Accurate);
+                  }
+                })
+                .onUpdate((time: number) => {
+                  if (!this.isDraggingProgress) {
+                    this.currentTime = time;
+                    this.syncCurrentItemProgress();
+                  }
+                })
+                .onStart(() => {
+                  this.isPlaying = true;
+                  this.isLoading = false;
+                  this.markCurrentPlaySession();
+                })
+                .onPause(() => {
+                  this.isPlaying = false;
+                  this.persistCurrentItem();
+                })
+                .onFinish(() => {
+                  this.isPlaying = false;
+                  this.isCompleted = true;
+                  this.currentTime = 0;
+                  if (this.currentMediaItem) {
+                    this.currentMediaItem.lastPosition = 0;
+                    this.currentMediaItem.isCompleted = true;
+                    this.currentMediaItem.lastPlayedAt = Date.now();
+                  }
+                  this.persistCurrentItem();
+                })
+                .onError(() => {
+                  const networkMessage = this.currentMediaItem?.sourceType === 'network'
+                    ? '网络播放失败，请检查链接是否有效、网络是否较弱，或稍后重试。'
+                    : '视频播放失败，可能是文件不可访问或格式暂不支持。';
+                  this.handlePlaybackFailure(networkMessage);
+                });
+            }, (sessionKey: number) => sessionKey.toString());
           }
 
           if (this.gestureHint.length > 0) {

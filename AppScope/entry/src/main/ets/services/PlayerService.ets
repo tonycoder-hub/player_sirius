@@ -1,7 +1,7 @@
 import type { MediaItem } from '../model/MediaItem';
 import { Playlist } from '../model/Playlist';
 
-export const PLAYBACK_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+export const PLAYBACK_SPEEDS = [0.75, 1.0, 1.25, 1.75, 2.0];
 
 export class PlayerService {
   private playlist: Playlist = new Playlist();
@@ -11,7 +11,13 @@ export class PlayerService {
     const existingIndex = this.playlist.findIndexByUri(item.uri);
     if (existingIndex >= 0) {
       this.playlist.setCurrentIndex(existingIndex);
-      return this.playlist.getCurrentItem() as MediaItem;
+      const currentItem = this.playlist.getCurrentItem() as MediaItem;
+      Object.assign(currentItem, {
+        ...item,
+        id: currentItem.id || item.id,
+        addedTime: currentItem.addedTime || item.addedTime
+      });
+      return currentItem;
     }
 
     this.playlist.addItem(item);

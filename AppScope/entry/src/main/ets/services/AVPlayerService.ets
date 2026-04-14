@@ -17,6 +17,8 @@ export class AVPlayerService {
   private surfaceId: string = '';
   private callbacksRegistered: boolean = false;
   private autoPlayOnPrepared: boolean = true;
+  private currentVolume: number = 1.0;
+  private currentSpeed: number = 1.0;
 
   setListener(listener: AVPlayerListener): void {
     this.listener = listener;
@@ -112,6 +114,22 @@ export class AVPlayerService {
     }
   }
 
+  async setVolume(volume: number): Promise<void> {
+    this.currentVolume = Math.max(0, Math.min(volume, 1));
+    if (!this.avPlayer) {
+      return;
+    }
+    await this.applyVolume(this.avPlayer);
+  }
+
+  async setSpeed(speed: number): Promise<void> {
+    this.currentSpeed = speed;
+    if (!this.avPlayer) {
+      return;
+    }
+    await this.applySpeed(this.avPlayer);
+  }
+
   async release(): Promise<void> {
     if (!this.avPlayer) {
       return;
@@ -148,6 +166,7 @@ export class AVPlayerService {
         }
 
         if (state === 'prepared') {
+          await this.applyPlaybackSettings(this.avPlayer);
           const durationSeconds = Math.floor(this.avPlayer.duration / 1000);
           this.listener?.onPrepared?.(durationSeconds);
           this.listener?.onDurationUpdate?.(durationSeconds);
@@ -191,5 +210,42 @@ export class AVPlayerService {
     });
 
     this.callbacksRegistered = true;
+  }
+
+  private async applyPlaybackSettings(player: media.AVPlayer): Promise<void> {
+    await this.applyVolume(player);
+    await this.applySpeed(player);
+  }
+
+  private async applyVolume(player: media.AVPlayer): Promise<void> {
+    const volumeCapablePlayer = player as media.AVPlayer & {
+      setVolume?: (volume: number) => Promise<void> | void;
+    };
+    if (!volumeCapablePlayer.setVolume) {
+      return;
+    }
+
+    try {
+      await volumeCapablePlayer.setVolume(this.currentVolume);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`AVPlayer setVolume failed: ${error.code}, ${error.message}`);
+    }
+  }
+
+  private async applySpeed(player: media.AVPlayer): Promise<void> {
+    const speedCapablePlayer = player as media.AVPlayer & {
+      setSpeed?: (speed: number) => Promise<void> | void;
+    };
+    if (!speedCapablePlayer.setSpeed) {
+      return;
+    }
+
+    try {
+      await speedCapablePlayer.setSpeed(this.currentSpeed);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`AVPlayer setSpeed failed: ${error.code}, ${error.message}`);
+    }
   }
 }
