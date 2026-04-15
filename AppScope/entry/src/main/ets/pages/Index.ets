@@ -15,6 +15,8 @@ import { SubtitleService } from '../services/SubtitleService';
 import type { WebDavEntry } from '../services/WebDavService';
 import { WebDavService } from '../services/WebDavService';
 import { WebDavDownloadService } from '../services/WebDavDownloadService';
+import type { FtpEntry } from '../services/FtpService';
+import { FtpService } from '../services/FtpService';
 
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
@@ -72,6 +74,7 @@ struct Index {
   @State selectedAudioTrackIndex: number = -1;
   @State currentAudioTrack: string = '默认音轨';
   @State currentSubtitleLabel: string = '未加载';
+  @State remoteMode: string = 'webdav';
   @State webDavBaseUrl: string = '';
   @State webDavUsername: string = '';
   @State webDavPassword: string = '';
@@ -79,6 +82,14 @@ struct Index {
   @State webDavEntries: WebDavEntry[] = [];
   @State webDavMessage: string = '';
   @State webDavLoading: boolean = false;
+  @State ftpHost: string = '';
+  @State ftpPort: number = 21;
+  @State ftpUsername: string = '';
+  @State ftpPassword: string = '';
+  @State ftpPath: string = '/';
+  @State ftpEntries: FtpEntry[] = [];
+  @State ftpMessage: string = '';
+  @State ftpLoading: boolean = false;
   @State gestureHint: string = '';
   @State playerKernelMode: string = 'video-component';
   @State avPlayerSurfaceId: string = '';
@@ -374,6 +385,66 @@ struct Index {
       this.webDavMessage = (err as Error)?.message || 'WebDAV 列目录失败。';
     } finally {
       this.webDavLoading = false;
+    }
+  }
+
+  private async listFtpDirectory(): Promise<void> {
+    const host = this.ftpHost.trim();
+    if (host.length === 0) {
+      this.ftpMessage = '请输入 FTP 主机地址。';
+      return;
+    }
+    const port = Number(this.ftpPort) || 21;
+    this.ftpLoading = true;
+    this.ftpMessage = '正在读取目录...';
+    try {
+      const entries = await FtpService.listDirectory(
+        host,
+        port,
+        this.ftpUsername.trim(),
+        this.ftpPassword,
+        this.ftpPath
+      );
+      this.ftpEntries = entries;
+      this.ftpMessage = entries.length > 0 ? `已读取 ${entries.length} 项` : '目录为空或无权限。';
+    } catch (err) {
+      console.error(`FTP list failed: ${err}`);
+      this.ftpEntries = [];
+      this.ftpMessage = (err as Error)?.message || 'FTP 列目录失败。';
+    } finally {
+      this.ftpLoading = false;
+    }
+  }
+
+  private async openFtpEntry(entry: FtpEntry): Promise<void> {
+    if (entry.isDirectory) {
+      this.ftpPath = entry.path;
+      await this.listFtpDirectory();
+      return;
+    }
+
+    try {
+      const ctx = this.getUiContext();
+      this.ftpMessage = '正在下载到缓存...';
+      const localUri = await FtpService.downloadToCache(
+        ctx,
+        this.ftpHost.trim(),
+        Number(this.ftpPort) || 21,
+        this.ftpUsername.trim(),
+        this.ftpPassword,
+        entry.path,
+        entry.name
+      );
+      this.showRemotePanel = false;
+      const item = this.createPlayableItem(localUri, entry.name);
+      item.folderName = 'FTP 缓存';
+      item.sourceType = 'local';
+      await this.storageService.upsertMediaItem(item);
+      await this.loadCollections();
+      await this.requestOpenItem(item);
+    } catch (err) {
+      console.error(`FTP download failed: ${err}`);
+      this.ftpMessage = (err as Error)?.message || 'FTP 下载失败';
     }
   }
 
@@ -2333,11 +2404,32 @@ struct Index {
   @Builder
   RemotePanelBuilder() {
     Column() {
-      Text('远端：WebDAV')
+      Text('远端：WebDAV / FTP')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
         .margin({ top: 20, bottom: 12 });
 
+      Row() {
+        Button('WebDAV')
+          .fontSize(12)
+          .backgroundColor(this.remoteMode === 'webdav' ? '#007DFF' : '#F3F4F6')
+          .fontColor(this.remoteMode === 'webdav' ? Color.White : Color.Black)
+          .onClick(() => {
+            this.remoteMode = 'webdav';
+          });
+        Button('FTP')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .backgroundColor(this.remoteMode === 'ftp' ? '#007DFF' : '#F3F4F6')
+          .fontColor(this.remoteMode === 'ftp' ? Color.White : Color.Black)
+          .onClick(() => {
+            this.remoteMode = 'ftp';
+          });
+      }
+      .width('90%')
+      .margin({ bottom: 12 });
+
+      if (this.remoteMode === 'webdav') {
       TextInput({ text: this.webDavBaseUrl, placeholder: 'WebDAV Base URL，例如 https://example.com/dav' })
         .width('90%')
         .backgroundColor('#F3F4F6')
@@ -2429,6 +2521,107 @@ struct Index {
         .fontColor('#6B7280')
         .width('90%')
         .margin({ top: 12 });
+      } else {
+        TextInput({ text: this.ftpHost, placeholder: 'FTP 主机，例如 192.168.1.2' })
+          .width('90%')
+          .backgroundColor('#F3F4F6')
+          .borderRadius(10)
+          .onChange((value: string) => {
+            this.ftpHost = value;
+          });
+
+        Row() {
+          TextInput({ text: this.ftpPort.toString(), placeholder: '端口' })
+            .layoutWeight(1)
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.ftpPort = Number(value) || 21;
+            });
+          TextInput({ text: this.ftpUsername, placeholder: '用户名（可选）' })
+            .layoutWeight(2)
+            .margin({ left: 10 })
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.ftpUsername = value;
+            });
+        }
+        .width('90%')
+        .margin({ top: 10 });
+
+        TextInput({ text: this.ftpPassword, placeholder: '密码（可选）' })
+          .width('90%')
+          .margin({ top: 10 })
+          .backgroundColor('#F3F4F6')
+          .borderRadius(10)
+          .onChange((value: string) => {
+            this.ftpPassword = value;
+          });
+
+        Row() {
+          TextInput({ text: this.ftpPath, placeholder: '路径（例如 / 或 /Movies/ ）' })
+            .layoutWeight(1)
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.ftpPath = value;
+            });
+
+          Button(this.ftpLoading ? '加载中' : '列目录')
+            .fontSize(14)
+            .margin({ left: 10 })
+            .enabled(!this.ftpLoading)
+            .onClick(() => {
+              this.listFtpDirectory();
+            });
+        }
+        .width('90%')
+        .margin({ top: 10, bottom: 12 });
+
+        if (this.ftpMessage.length > 0) {
+          Text(this.ftpMessage)
+            .fontSize(12)
+            .fontColor('#2563EB')
+            .width('90%')
+            .margin({ bottom: 10 });
+        }
+
+        List({ space: 8 }) {
+          ForEach(this.ftpEntries, (entry: FtpEntry) => {
+            ListItem() {
+              Row() {
+                Text(entry.isDirectory ? `[目录] ${entry.name}` : entry.name)
+                  .fontSize(13)
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis });
+
+                if (!entry.isDirectory) {
+                  Text(entry.sizeBytes > 0 ? `${Math.round(entry.sizeBytes / 1024)}KB` : '')
+                    .fontSize(11)
+                    .fontColor('#6B7280');
+                }
+              }
+              .width('100%')
+              .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+              .borderRadius(8)
+              .backgroundColor('#F8F8F8')
+              .onClick(() => {
+                this.openFtpEntry(entry);
+              });
+            }
+          }, (entry: FtpEntry) => entry.path);
+        }
+        .width('90%')
+        .height('58%');
+
+        Text('说明：FTP 文件会先下载到缓存再播放（当前为最小实现：PASV + MLSD/LIST + RETR）。')
+          .fontSize(11)
+          .fontColor('#6B7280')
+          .width('90%')
+          .margin({ top: 12 });
+      }
     }
     .width('100%')
     .height('100%')

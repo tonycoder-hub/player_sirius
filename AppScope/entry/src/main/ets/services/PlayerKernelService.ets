@@ -55,7 +55,7 @@ export class PlayerKernelService {
       audioFocus: true,
       smb: false,
       webdav: false,
-      ftp: false,
+      ftp: true,
       casting: false,
       equalizer: false
     }
