@@ -14,6 +14,7 @@ import type { SubtitleCue } from '../services/SubtitleService';
 import { SubtitleService } from '../services/SubtitleService';
 import type { WebDavEntry } from '../services/WebDavService';
 import { WebDavService } from '../services/WebDavService';
+import { WebDavDownloadService } from '../services/WebDavDownloadService';
 
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
@@ -402,7 +403,34 @@ struct Index {
       return;
     }
 
-    // Try to open with direct URL. If the WebDAV server requires auth headers, playback may fail.
+    // If credentials exist, download into sandbox cache first to make playback work without custom headers.
+    if (this.webDavUsername.trim().length > 0) {
+      try {
+        const ctx = this.getUiContext();
+        this.webDavMessage = '正在下载到缓存...';
+        const localUri = await WebDavDownloadService.downloadToCache(
+          ctx,
+          entry.href,
+          entry.name,
+          this.webDavUsername.trim(),
+          this.webDavPassword
+        );
+        this.showRemotePanel = false;
+        const item = this.createPlayableItem(localUri, entry.name);
+        item.folderName = 'WebDAV 缓存';
+        item.sourceType = 'local';
+        await this.storageService.upsertMediaItem(item);
+        await this.loadCollections();
+        await this.requestOpenItem(item);
+        return;
+      } catch (err) {
+        console.error(`WebDAV download failed: ${err}`);
+        this.webDavMessage = (err as Error)?.message || '下载失败';
+        return;
+      }
+    }
+
+    // Otherwise, try to open with direct URL. If the WebDAV server requires auth headers, playback may fail.
     this.showRemotePanel = false;
     this.networkUrl = entry.href;
     await this.openNetworkMedia();
@@ -2396,7 +2424,7 @@ struct Index {
       .width('90%')
       .height('58%');
 
-      Text('说明：若 WebDAV 服务器需要鉴权，列目录可用 Basic Auth，但直接播放可能因无法注入请求头而失败。')
+      Text('说明：若填写账号密码，将先下载到缓存再播放；未填写则尝试直链播放。')
         .fontSize(11)
         .fontColor('#6B7280')
         .width('90%')
