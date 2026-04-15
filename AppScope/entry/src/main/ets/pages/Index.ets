@@ -1,6 +1,7 @@
 import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
+import { media } from '@kit.MediaKit';
 import window from '@ohos.window';
 import audio from '@ohos.multimedia.audio';
 import type { AVPlayerListener, AVPlayerTrackSummary } from '../services/AVPlayerService';
@@ -23,6 +24,8 @@ import { DlnaService } from '../services/DlnaService';
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
 const ALL_FOLDERS_LABEL = '全部文件夹';
+const WEAK_NET_STALL_THRESHOLD_MS = 6000;
+const NETWORK_AUTO_RETRY_LIMIT = 2;
 
 @Entry
 @Component
@@ -97,6 +100,13 @@ struct Index {
   @State dlnaMessage: string = '';
   @State dlnaLoading: boolean = false;
   @State selectedDlnaDeviceUsn: string = '';
+  @State bufferPercent: number = 0;
+  @State cachedDurationSeconds: number = 0;
+  @State isBuffering: boolean = false;
+  @State firstFrameCostMs: number = 0;
+  @State availableBitrates: number[] = [];
+  @State autoRetryCount: number = 0;
+  @State weakNetHint: string = '';
   @State gestureHint: string = '';
   @State playerKernelMode: string = 'video-component';
   @State avPlayerSurfaceId: string = '';
@@ -110,17 +120,22 @@ struct Index {
   private lastSessionUpdateAt: number = 0;
   private wasPlayingBeforeInterrupt: boolean = false;
   private volumeBeforeDuck: number | null = null;
+  private playbackStartAtMs: number = 0;
+  private lastPlaybackProgressAtMs: number = 0;
+  private stallMonitorTimer: number = -1;
 
   aboutToAppear(): void {
     this.bindAVPlayerListeners();
     this.syncPlayerState();
     this.loadCollections();
+    this.startStallMonitor();
   }
 
   aboutToDisappear(): void {
     this.persistCurrentItem();
     this.avPlayerService.release();
     this.backgroundPlaybackService.ensureStopped();
+    this.stopStallMonitor();
     this.setPreferredOrientation(window.Orientation.PORTRAIT);
   }
 
@@ -223,6 +238,12 @@ struct Index {
         this.duration = durationSeconds;
         this.isPrepared = true;
         this.isLoading = false;
+        this.playbackStartAtMs = Date.now();
+        this.firstFrameCostMs = 0;
+        this.bufferPercent = 0;
+        this.cachedDurationSeconds = 0;
+        this.isBuffering = false;
+        this.weakNetHint = '';
         if (this.currentMediaItem) {
           this.currentMediaItem.duration = durationSeconds;
           this.currentMediaItem.isCompleted = false;
@@ -237,6 +258,7 @@ struct Index {
       onTimeUpdate: (currentTimeSeconds: number) => {
         if (!this.isDraggingProgress) {
           this.currentTime = currentTimeSeconds;
+          this.lastPlaybackProgressAtMs = Date.now();
           this.syncCurrentItemProgress();
           this.updateSubtitleRender(currentTimeSeconds);
           this.maybeUpdateBackgroundSession();
@@ -248,6 +270,7 @@ struct Index {
       onStart: () => {
         this.isPlaying = true;
         this.isLoading = false;
+        this.lastPlaybackProgressAtMs = Date.now();
         this.markCurrentPlaySession();
         this.startBackgroundPlaybackIfNeeded();
       },
@@ -270,14 +293,115 @@ struct Index {
         this.persistCurrentItem();
       },
       onError: (message: string) => {
+        if (this.tryAutoRetryAfterNetworkFailure(message)) {
+          return;
+        }
         this.handlePlaybackFailure(message);
         this.backgroundPlaybackService.ensureStopped();
       },
       onAudioInterrupt: (event: unknown) => {
         this.handleAudioInterrupt(event);
+      },
+      onBufferingUpdate: (infoType: unknown, value: number) => {
+        this.handleBufferingUpdate(infoType, value);
+      },
+      onStartRenderFrame: () => {
+        if (this.firstFrameCostMs <= 0 && this.playbackStartAtMs > 0) {
+          this.firstFrameCostMs = Math.max(0, Date.now() - this.playbackStartAtMs);
+        }
+        this.isLoading = false;
+        this.isBuffering = false;
+        this.weakNetHint = '';
+      },
+      onAvailableBitrates: (bitrates: number[]) => {
+        this.availableBitrates = bitrates.slice().sort((a: number, b: number) => a - b);
       }
     };
     this.avPlayerService.setListener(listener);
+  }
+
+  private handleBufferingUpdate(infoType: unknown, value: number): void {
+    const type = Number(infoType);
+    const bufferingInfoType = media.BufferingInfoType as unknown as Record<string, number>;
+
+    if (type === bufferingInfoType.BUFFERING_START) {
+      this.isBuffering = true;
+      this.weakNetHint = '正在缓冲...';
+      return;
+    }
+
+    if (type === bufferingInfoType.BUFFERING_END) {
+      this.isBuffering = false;
+      if (this.weakNetHint === '正在缓冲...') {
+        this.weakNetHint = '';
+      }
+      return;
+    }
+
+    if (type === bufferingInfoType.BUFFERING_PERCENT) {
+      this.bufferPercent = Math.max(0, Math.min(Math.floor(value), 100));
+      return;
+    }
+
+    if (type === bufferingInfoType.CACHED_DURATION) {
+      this.cachedDurationSeconds = Math.max(0, Math.floor(value / 1000));
+    }
+  }
+
+  private startStallMonitor(): void {
+    if (this.stallMonitorTimer >= 0) {
+      return;
+    }
+    this.stallMonitorTimer = setInterval(() => {
+      this.checkWeakNetStall();
+    }, 2000) as unknown as number;
+  }
+
+  private stopStallMonitor(): void {
+    if (this.stallMonitorTimer < 0) {
+      return;
+    }
+    clearInterval(this.stallMonitorTimer);
+    this.stallMonitorTimer = -1;
+  }
+
+  private checkWeakNetStall(): void {
+    if (!this.currentMediaItem || this.currentMediaItem.sourceType !== 'network') {
+      return;
+    }
+    if (!this.isUsingAVPlayer() || !this.isPrepared || !this.isPlaying || this.hasPlayableError) {
+      return;
+    }
+    const now = Date.now();
+    if (this.lastPlaybackProgressAtMs <= 0) {
+      this.lastPlaybackProgressAtMs = now;
+      return;
+    }
+    if (now - this.lastPlaybackProgressAtMs < WEAK_NET_STALL_THRESHOLD_MS) {
+      return;
+    }
+    if (this.isBuffering || this.cachedDurationSeconds <= 2) {
+      this.weakNetHint = '弱网检测：播放可能卡顿，正在尝试恢复';
+      if (this.autoRetryCount < NETWORK_AUTO_RETRY_LIMIT) {
+        this.autoRetryCount += 1;
+        this.lastPlaybackProgressAtMs = now;
+        this.retryCurrent();
+      }
+    }
+  }
+
+  private tryAutoRetryAfterNetworkFailure(message: string): boolean {
+    if (!this.currentMediaItem || this.currentMediaItem.sourceType !== 'network') {
+      return false;
+    }
+    if (this.autoRetryCount >= NETWORK_AUTO_RETRY_LIMIT) {
+      return false;
+    }
+    this.autoRetryCount += 1;
+    this.weakNetHint = `网络异常，正在自动重试（${this.autoRetryCount}/${NETWORK_AUTO_RETRY_LIMIT}）`;
+    this.gestureHint = this.weakNetHint;
+    this.retryCurrent();
+    return true;
   }
 
   private handleAudioInterrupt(event: unknown): void {
@@ -885,6 +1009,14 @@ struct Index {
     this.isCompleted = false;
     this.errorMessage = '';
     this.sessionPlayCountRecorded = false;
+    this.bufferPercent = 0;
+    this.cachedDurationSeconds = 0;
+    this.isBuffering = false;
+    this.firstFrameCostMs = 0;
+    this.availableBitrates = [];
+    this.weakNetHint = '';
+    this.playbackStartAtMs = Date.now();
+    this.lastPlaybackProgressAtMs = Date.now();
   }
 
   private stopCurrentPlaybackForSwitch(): void {
@@ -905,6 +1037,7 @@ struct Index {
     this.isPlaying = false;
     this.hasPlayableError = true;
     this.errorMessage = message;
+    this.isBuffering = false;
     this.backgroundPlaybackService.ensureStopped();
   }
 
@@ -1250,6 +1383,7 @@ struct Index {
     this.currentTime = this.currentMediaItem.lastPosition;
     this.duration = this.currentMediaItem.duration;
     this.resetPlaybackFlags();
+    this.weakNetHint = this.autoRetryCount > 0 ? `自动重试中（${this.autoRetryCount}/${NETWORK_AUTO_RETRY_LIMIT}）` : '';
     if (this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
       this.avPlayerService.open(this.currentMediaItem.uri, true);
     } else if (!this.isUsingAVPlayer()) {
@@ -1793,6 +1927,16 @@ struct Index {
               .fontSize(12)
               .width('100%')
               .margin({ top: 4 });
+            Text(`首帧：${this.firstFrameCostMs > 0 ? `${this.firstFrameCostMs}ms` : '--'} · 缓冲：${this.bufferPercent}% · 已缓存：${this.cachedDurationSeconds}s`)
+              .fontSize(12)
+              .width('100%')
+              .margin({ top: 4 });
+            if (this.availableBitrates.length > 0) {
+              Text(`HLS 码率档位：${this.availableBitrates.length} 个`)
+                .fontSize(12)
+                .width('100%')
+                .margin({ top: 4 });
+            }
           }
           .width('100%')
           .padding(12)
@@ -1974,6 +2118,22 @@ struct Index {
           Text('正在加载媒体信息...')
             .fontSize(12)
             .fontColor('#666666')
+            .width('100%')
+            .margin({ top: 6 });
+        }
+
+        if (this.isBuffering) {
+          Text(`正在缓冲... ${this.bufferPercent}% · 预计已缓存 ${this.cachedDurationSeconds}s`)
+            .fontSize(12)
+            .fontColor('#B45309')
+            .width('100%')
+            .margin({ top: 6 });
+        }
+
+        if (this.weakNetHint.length > 0) {
+          Text(this.weakNetHint)
+            .fontSize(12)
+            .fontColor('#D97706')
             .width('100%')
             .margin({ top: 6 });
         }

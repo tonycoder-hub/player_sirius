@@ -10,6 +10,9 @@ export interface AVPlayerListener {
   onCompletion?: () => void;
   onError?: (message: string) => void;
   onAudioInterrupt?: (event: unknown) => void;
+  onBufferingUpdate?: (infoType: unknown, value: number) => void;
+  onStartRenderFrame?: () => void;
+  onAvailableBitrates?: (bitrates: number[]) => void;
 }
 
 export interface AVPlayerTrackSummary {
@@ -315,6 +318,18 @@ export class AVPlayerService {
 
     player.on('audioInterrupt', (event: unknown) => {
       this.listener?.onAudioInterrupt?.(event);
+    });
+
+    player.on('bufferingUpdate', (infoType: unknown, value: number) => {
+      this.listener?.onBufferingUpdate?.(infoType, value);
+    });
+
+    player.on('startRenderFrame', () => {
+      this.listener?.onStartRenderFrame?.();
+    });
+
+    player.on('availableBitrates', (bitrates: number[]) => {
+      this.listener?.onAvailableBitrates?.(bitrates);
     });
 
     this.callbacksRegistered = true;
