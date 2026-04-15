@@ -6,11 +6,11 @@ namespace player_sirius {
 
 namespace {
 
-constexpr const char* kSoftBackendVersion = "0.3.1-p0";
+constexpr const char* kSoftBackendVersion = "0.5.0-p1";
 
 #if PLAYER_SIRIUS_HAS_FFMPEG
 constexpr const char* kBackendName = "ffmpeg-linked";
-constexpr const char* kBlockerMessage = "FFmpeg detected, but decode/render pipeline is not implemented yet";
+constexpr const char* kBlockerMessage = "FFmpeg demux/decode pipeline is available, but real platform audio/video outputs are not implemented yet";
 #else
 constexpr const char* kBackendName = "ffmpeg-placeholder";
 constexpr const char* kBlockerMessage = "FFmpeg backend not linked into current repository";
@@ -31,6 +31,12 @@ public:
         capability.features = {
             "soft-demux-interface",
             "soft-decoder-interface",
+            "packet-frame-queues",
+            "decode-drain",
+            "audio-resampler",
+            "video-converter",
+            "memory-audio-sink",
+            "memory-video-sink",
             "render-interface",
             "av-sync-interface",
             "event-bridge",

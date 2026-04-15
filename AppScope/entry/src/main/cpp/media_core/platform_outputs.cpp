@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "audio_resampler.h"
+
 namespace player_sirius {
 
 namespace {
@@ -26,26 +28,48 @@ public:
             Assign(error, "audio output source is empty");
             return false;
         }
+#if PLAYER_SIRIUS_HAS_FFMPEG
+        last_error_.clear();
+        return true;
+#else
         Assign(error, kAudioOutputBlocker);
         return false;
+#endif
     }
 
     bool Submit(const MediaFrame& frame, std::string* error) override
     {
         last_pts_ms_ = frame.pts_ms;
+#if PLAYER_SIRIUS_HAS_FFMPEG
+        if (!frame.audio) {
+            return true;
+        }
+        if (!resampler_.Convert(frame, &last_pcm_buffer_, error)) {
+            last_error_ = error != nullptr ? *error : "audio resampler conversion failed";
+            return false;
+        }
+        last_error_.clear();
+        return true;
+#else
         Assign(error, kAudioOutputBlocker);
         return false;
+#endif
     }
 
     void Reset() override
     {
         last_pts_ms_ = 0;
+        last_pcm_buffer_ = AudioPcmBuffer();
+        resampler_.Reset();
     }
 
     void Close() override
     {
         source_ = SourceSpec();
         last_pts_ms_ = 0;
+        last_pcm_buffer_ = AudioPcmBuffer();
+        last_error_.clear();
+        resampler_.Reset();
     }
 
 private:
@@ -58,6 +82,9 @@ private:
 
     SourceSpec source_;
     int64_t last_pts_ms_ = 0;
+    std::string last_error_;
+    AudioResampler resampler_;
+    AudioPcmBuffer last_pcm_buffer_;
 };
 
 class SimpleStatsCollector final : public PlaybackStatsCollector {
@@ -128,6 +155,23 @@ public:
     void OnBufferedDuration(int64_t buffered_duration_ms) override
     {
         metrics_.buffered_duration_ms = std::max<int64_t>(0, buffered_duration_ms);
+    }
+
+    void OnQueueDepths(int64_t packet_queue_depth, int64_t audio_queue_depth, int64_t video_queue_depth) override
+    {
+        metrics_.packet_queue_depth = std::max<int64_t>(0, packet_queue_depth);
+        metrics_.audio_queue_depth = std::max<int64_t>(0, audio_queue_depth);
+        metrics_.video_queue_depth = std::max<int64_t>(0, video_queue_depth);
+    }
+
+    void OnAudioClock(int64_t position_ms) override
+    {
+        metrics_.audio_clock_ms = std::max<int64_t>(0, position_ms);
+    }
+
+    void OnVideoClock(int64_t position_ms) override
+    {
+        metrics_.video_clock_ms = std::max<int64_t>(0, position_ms);
     }
 
     PlaybackMetrics Snapshot() const override

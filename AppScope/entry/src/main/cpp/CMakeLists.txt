@@ -22,10 +22,15 @@ find_path(PLAYER_SIRIUS_NODE_API_INCLUDE_DIR
 
 add_library(native_player_bridge SHARED
   native_player_bridge.cpp
+  media_core/audio_resampler.cpp
+  media_core/ffmpeg_decoder.cpp
+  media_core/ffmpeg_demuxer.cpp
   media_core/media_pipeline.cpp
   media_core/player_core.cpp
   media_core/platform_outputs.cpp
   media_core/soft_backend.cpp
+  media_core/sync_controller.cpp
+  media_core/video_converter.cpp
 )
 
 add_library(smb_client_bridge SHARED

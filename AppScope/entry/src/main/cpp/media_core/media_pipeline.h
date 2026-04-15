@@ -1,11 +1,17 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
+#include "media_queue.h"
 #include "platform_outputs.h"
 #include "pipeline_components.h"
+#include "sync_controller.h"
 
 namespace player_sirius {
 
@@ -32,6 +38,14 @@ public:
 
 private:
     void SetStage(const std::string& stage);
+    bool StartPlaybackWorker(std::string* error);
+    void StopPlaybackWorker();
+    void PlaybackLoop();
+    bool FillPacketQueue(std::string* error);
+    bool DecodePacketIntoFrames(std::string* error);
+    bool DrainDecoderFrames(std::string* error);
+    bool DrainFrameQueues(std::string* error);
+    int64_t EstimateBufferedDurationMs() const;
 
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<Decoder> decoder_;
@@ -39,10 +53,20 @@ private:
     std::unique_ptr<AudioOutput> audio_output_;
     std::unique_ptr<Clock> clock_;
     std::unique_ptr<PlaybackStatsCollector> stats_collector_;
+    MediaQueue<MediaPacket> packet_queue_{48};
+    MediaQueue<MediaFrame> audio_frame_queue_{48};
+    MediaQueue<MediaFrame> video_frame_queue_{48};
+    SyncController sync_controller_;
     SourceSpec source_;
     std::string stage_ = "idle";
     bool prepared_ = false;
-    bool playing_ = false;
+    std::atomic<bool> playing_{false};
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> end_of_stream_{false};
+    std::atomic<bool> decoder_drained_{false};
+    mutable std::mutex state_mutex_;
+    std::condition_variable playback_condition_;
+    std::thread playback_thread_;
 };
 
 std::unique_ptr<MediaPipeline> CreateDefaultMediaPipeline();

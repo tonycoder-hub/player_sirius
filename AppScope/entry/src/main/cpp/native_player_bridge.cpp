@@ -150,6 +150,11 @@ napi_value CreateMetricsObject(napi_env env, const player_sirius::PlaybackMetric
     napi_set_named_property(env, obj, "renderedAudioFrames", MakeInt64(env, metrics.rendered_audio_frames));
     napi_set_named_property(env, obj, "renderedVideoFrames", MakeInt64(env, metrics.rendered_video_frames));
     napi_set_named_property(env, obj, "droppedVideoFrames", MakeInt64(env, metrics.dropped_video_frames));
+    napi_set_named_property(env, obj, "audioClockMs", MakeInt64(env, metrics.audio_clock_ms));
+    napi_set_named_property(env, obj, "videoClockMs", MakeInt64(env, metrics.video_clock_ms));
+    napi_set_named_property(env, obj, "packetQueueDepth", MakeInt64(env, metrics.packet_queue_depth));
+    napi_set_named_property(env, obj, "audioQueueDepth", MakeInt64(env, metrics.audio_queue_depth));
+    napi_set_named_property(env, obj, "videoQueueDepth", MakeInt64(env, metrics.video_queue_depth));
     napi_set_named_property(env, obj, "emittedEvents", MakeInt64(env, metrics.emitted_events));
     return obj;
 }

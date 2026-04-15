@@ -35,6 +35,9 @@ public:
     virtual void OnRenderFrame(bool audio, bool video) = 0;
     virtual void OnDropVideoFrame() = 0;
     virtual void OnBufferedDuration(int64_t buffered_duration_ms) = 0;
+    virtual void OnQueueDepths(int64_t packet_queue_depth, int64_t audio_queue_depth, int64_t video_queue_depth) = 0;
+    virtual void OnAudioClock(int64_t position_ms) = 0;
+    virtual void OnVideoClock(int64_t position_ms) = 0;
     virtual PlaybackMetrics Snapshot() const = 0;
 };
 

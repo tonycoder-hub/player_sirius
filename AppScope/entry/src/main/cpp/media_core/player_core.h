@@ -1,9 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "player_types.h"
 #include "soft_backend.h"
@@ -32,10 +35,17 @@ private:
     void Emit(const std::string& type, const std::string& message = "") const;
     void Fail(const std::string& message);
     void SyncSnapshotRuntime();
+    void StartRuntimeMonitor();
+    void StopRuntimeMonitor();
+    void RuntimeMonitorLoop();
 
     std::unique_ptr<SoftDecodeBackend> backend_;
-    StateSnapshot snapshot_;
+    mutable StateSnapshot snapshot_;
+    mutable std::mutex snapshot_mutex_;
     EventSink event_sink_;
+    std::thread runtime_monitor_thread_;
+    std::atomic<bool> runtime_monitor_running_{false};
+    std::atomic<bool> runtime_monitor_stop_requested_{false};
 };
 
 } // namespace player_sirius

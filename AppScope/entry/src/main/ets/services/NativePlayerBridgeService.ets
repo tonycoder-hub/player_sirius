@@ -14,6 +14,11 @@ export interface NativePlayerMetrics {
   renderedAudioFrames: number;
   renderedVideoFrames: number;
   droppedVideoFrames: number;
+  audioClockMs: number;
+  videoClockMs: number;
+  packetQueueDepth: number;
+  audioQueueDepth: number;
+  videoQueueDepth: number;
   emittedEvents: number;
 }
 
@@ -95,6 +100,11 @@ export class NativePlayerBridgeService {
         renderedAudioFrames: 0,
         renderedVideoFrames: 0,
         droppedVideoFrames: 0,
+        audioClockMs: 0,
+        videoClockMs: 0,
+        packetQueueDepth: 0,
+        audioQueueDepth: 0,
+        videoQueueDepth: 0,
         emittedEvents: 0
       }
     };

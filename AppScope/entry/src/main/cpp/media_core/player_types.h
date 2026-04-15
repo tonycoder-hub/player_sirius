@@ -12,6 +12,7 @@ enum class PlaybackState {
     kPlaying,
     kPaused,
     kStopped,
+    kCompleted,
     kError,
 };
 
@@ -28,6 +29,8 @@ inline const char* ToString(PlaybackState state)
             return "paused";
         case PlaybackState::kStopped:
             return "stopped";
+        case PlaybackState::kCompleted:
+            return "completed";
         case PlaybackState::kError:
             return "error";
         default:
@@ -47,6 +50,11 @@ struct PlaybackMetrics {
     int64_t rendered_audio_frames = 0;
     int64_t rendered_video_frames = 0;
     int64_t dropped_video_frames = 0;
+    int64_t audio_clock_ms = 0;
+    int64_t video_clock_ms = 0;
+    int64_t packet_queue_depth = 0;
+    int64_t audio_queue_depth = 0;
+    int64_t video_queue_depth = 0;
     int64_t emitted_events = 0;
 };
 

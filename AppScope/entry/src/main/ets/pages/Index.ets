@@ -216,7 +216,7 @@ struct Index {
     if (!metrics) {
       return 'buf 0ms · dv 0 · rv 0';
     }
-    return `buf ${metrics.bufferedDurationMs}ms · dv ${metrics.decodedVideoFrames} · rv ${metrics.renderedVideoFrames}`;
+    return `buf ${metrics.bufferedDurationMs}ms · dv ${metrics.decodedVideoFrames} · rv ${metrics.renderedVideoFrames} · aq ${metrics.audioQueueDepth} · vq ${metrics.videoQueueDepth} · ac ${metrics.audioClockMs}`;
   }
 
   private bindNativePlayerListeners(): void {
