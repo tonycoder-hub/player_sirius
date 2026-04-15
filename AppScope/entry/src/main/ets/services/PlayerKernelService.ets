@@ -36,7 +36,7 @@ export class PlayerKernelService {
       smb: false,
       webdav: false,
       ftp: false,
-      casting: false,
+      casting: true,
       equalizer: false
     }
   };
@@ -56,7 +56,7 @@ export class PlayerKernelService {
       smb: false,
       webdav: false,
       ftp: true,
-      casting: false,
+      casting: true,
       equalizer: false
     }
   };

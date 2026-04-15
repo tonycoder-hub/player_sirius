@@ -17,6 +17,8 @@ import { WebDavService } from '../services/WebDavService';
 import { WebDavDownloadService } from '../services/WebDavDownloadService';
 import type { FtpEntry } from '../services/FtpService';
 import { FtpService } from '../services/FtpService';
+import type { DlnaDevice } from '../services/DlnaService';
+import { DlnaService } from '../services/DlnaService';
 
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
@@ -49,6 +51,7 @@ struct Index {
   @State showMediaInfo: boolean = false;
   @State showTrackPanel: boolean = false;
   @State showRemotePanel: boolean = false;
+  @State showCastingPanel: boolean = false;
   @State playlistItems: MediaItem[] = [];
   @State historyItems: MediaItem[] = [];
   @State libraryItems: MediaItem[] = [];
@@ -90,6 +93,10 @@ struct Index {
   @State ftpEntries: FtpEntry[] = [];
   @State ftpMessage: string = '';
   @State ftpLoading: boolean = false;
+  @State dlnaDevices: DlnaDevice[] = [];
+  @State dlnaMessage: string = '';
+  @State dlnaLoading: boolean = false;
+  @State selectedDlnaDeviceUsn: string = '';
   @State gestureHint: string = '';
   @State playerKernelMode: string = 'video-component';
   @State avPlayerSurfaceId: string = '';
@@ -445,6 +452,106 @@ struct Index {
     } catch (err) {
       console.error(`FTP download failed: ${err}`);
       this.ftpMessage = (err as Error)?.message || 'FTP 下载失败';
+    }
+  }
+
+  private getSelectedDlnaDevice(): DlnaDevice | null {
+    return this.dlnaDevices.find((device: DlnaDevice) => device.usn === this.selectedDlnaDeviceUsn) ?? null;
+  }
+
+  private getCurrentCastableUrl(): string {
+    if (!this.currentMediaItem) {
+      return '';
+    }
+    const uri = this.currentMediaItem.uri.trim();
+    if (uri.startsWith('http://') || uri.startsWith('https://')) {
+      return uri;
+    }
+    return '';
+  }
+
+  private async discoverDlnaDevices(): Promise<void> {
+    this.dlnaLoading = true;
+    this.dlnaMessage = '正在搜索设备...';
+    try {
+      const devices = await DlnaService.discoverDevices(3000);
+      this.dlnaDevices = devices;
+      if (devices.length > 0) {
+        this.selectedDlnaDeviceUsn = devices[0].usn;
+      } else {
+        this.selectedDlnaDeviceUsn = '';
+      }
+      this.dlnaMessage = devices.length > 0 ? `已发现 ${devices.length} 台设备` : '未发现 DLNA 设备';
+    } catch (err) {
+      console.error(`DLNA discover failed: ${err}`);
+      this.dlnaDevices = [];
+      this.selectedDlnaDeviceUsn = '';
+      this.dlnaMessage = (err as Error)?.message || '设备发现失败';
+    } finally {
+      this.dlnaLoading = false;
+    }
+  }
+
+  private async castToSelectedDevice(): Promise<void> {
+    const device = this.getSelectedDlnaDevice();
+    const mediaUrl = this.getCurrentCastableUrl();
+    if (!device) {
+      this.dlnaMessage = '请先选择设备';
+      return;
+    }
+    if (mediaUrl.length === 0) {
+      this.dlnaMessage = '当前仅支持投送 HTTP/HTTPS 网络流，本地文件暂未转 HTTP 服务';
+      return;
+    }
+    this.dlnaMessage = '正在投送媒体...';
+    try {
+      await DlnaService.cast(device, mediaUrl);
+      this.dlnaMessage = `已投送到 ${device.friendlyName}`;
+    } catch (err) {
+      console.error(`DLNA cast failed: ${err}`);
+      this.dlnaMessage = (err as Error)?.message || '投送失败';
+    }
+  }
+
+  private async playOnSelectedDevice(): Promise<void> {
+    const device = this.getSelectedDlnaDevice();
+    if (!device) {
+      this.dlnaMessage = '请先选择设备';
+      return;
+    }
+    try {
+      await DlnaService.play(device);
+      this.dlnaMessage = `已让 ${device.friendlyName} 播放`;
+    } catch (err) {
+      this.dlnaMessage = (err as Error)?.message || '播放控制失败';
+    }
+  }
+
+  private async pauseOnSelectedDevice(): Promise<void> {
+    const device = this.getSelectedDlnaDevice();
+    if (!device) {
+      this.dlnaMessage = '请先选择设备';
+      return;
+    }
+    try {
+      await DlnaService.pause(device);
+      this.dlnaMessage = `已让 ${device.friendlyName} 暂停`;
+    } catch (err) {
+      this.dlnaMessage = (err as Error)?.message || '暂停控制失败';
+    }
+  }
+
+  private async stopOnSelectedDevice(): Promise<void> {
+    const device = this.getSelectedDlnaDevice();
+    if (!device) {
+      this.dlnaMessage = '请先选择设备';
+      return;
+    }
+    try {
+      await DlnaService.stop(device);
+      this.dlnaMessage = `已让 ${device.friendlyName} 停止`;
+    } catch (err) {
+      this.dlnaMessage = (err as Error)?.message || '停止控制失败';
     }
   }
 
@@ -1591,6 +1698,13 @@ struct Index {
               .onClick(() => {
                 this.showRemotePanel = true;
               });
+
+            Button('投屏')
+              .fontSize(12)
+              .margin({ left: 8 })
+              .onClick(() => {
+                this.showCastingPanel = true;
+              });
           }
           .width('100%');
 
@@ -1930,6 +2044,13 @@ struct Index {
       dragBar: true,
       onDisappear: () => {
         this.showRemotePanel = false;
+      }
+    })
+    .bindSheet($$this.showCastingPanel, this.CastingPanelBuilder(), {
+      height: 520,
+      dragBar: true,
+      onDisappear: () => {
+        this.showCastingPanel = false;
       }
     });
   }
@@ -2622,6 +2743,106 @@ struct Index {
           .width('90%')
           .margin({ top: 12 });
       }
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Center);
+  }
+
+  @Builder
+  CastingPanelBuilder() {
+    Column() {
+      Text('DLNA 投屏')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+        .margin({ top: 20, bottom: 16 });
+
+      Row() {
+        Button(this.dlnaLoading ? '搜索中' : '搜索设备')
+          .fontSize(14)
+          .enabled(!this.dlnaLoading)
+          .onClick(() => {
+            this.discoverDlnaDevices();
+          });
+
+        Button('投送当前媒体')
+          .fontSize(14)
+          .margin({ left: 10 })
+          .enabled(this.getCurrentCastableUrl().length > 0 && this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.castToSelectedDevice();
+          });
+      }
+      .width('90%')
+      .margin({ bottom: 12 });
+
+      Row() {
+        Button('播放')
+          .fontSize(12)
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.playOnSelectedDevice();
+          });
+        Button('暂停')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.pauseOnSelectedDevice();
+          });
+        Button('停止')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.stopOnSelectedDevice();
+          });
+      }
+      .width('90%')
+      .margin({ bottom: 12 });
+
+      if (this.dlnaMessage.length > 0) {
+        Text(this.dlnaMessage)
+          .fontSize(12)
+          .fontColor('#2563EB')
+          .width('90%')
+          .margin({ bottom: 10 });
+      }
+
+      List({ space: 8 }) {
+        ForEach(this.dlnaDevices, (device: DlnaDevice) => {
+          ListItem() {
+            Row() {
+              Text(device.friendlyName)
+                .fontSize(14)
+                .layoutWeight(1)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis });
+
+              if (this.selectedDlnaDeviceUsn === device.usn) {
+                Text('已选中')
+                  .fontSize(12)
+                  .fontColor('#007DFF');
+              }
+            }
+            .width('100%')
+            .padding({ left: 15, right: 15, top: 12, bottom: 12 })
+            .borderRadius(8)
+            .backgroundColor(this.selectedDlnaDeviceUsn === device.usn ? '#E8F4FF' : '#F8F8F8')
+            .onClick(() => {
+              this.selectedDlnaDeviceUsn = device.usn;
+            });
+          }
+        }, (device: DlnaDevice) => device.usn);
+      }
+      .width('90%')
+      .height('56%');
+
+      Text('说明：当前仅支持把 HTTP/HTTPS 网络流投送到支持 DLNA AVTransport 的 MediaRenderer，本地文件暂未暴露成本地 HTTP 服务。')
+        .fontSize(11)
+        .fontColor('#6B7280')
+        .width('90%')
+        .margin({ top: 12 });
     }
     .width('100%')
     .height('100%')
