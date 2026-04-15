@@ -1,3 +1,5 @@
+import type { common } from '@kit.AbilityKit';
+
 export interface SmbCapability {
   available: boolean;
   backendName: string;
@@ -58,7 +60,7 @@ interface SmbNativeBridge {
     path: string
   ) => number;
   listDirectory?: () => SmbEntry[];
-  openFile?: (path: string) => string;
+  openFile?: (path: string, cacheDir: string, suggestedName: string) => string;
   release?: () => void;
 }
 
@@ -66,6 +68,7 @@ const SMB_BLOCKER = '当前仓库尚未接入 libsmb2 Native 依赖，SMB/NAS �
 
 export class SmbService {
   private bridge: SmbNativeBridge | null = null;
+  private context: common.UIAbilityContext | null = null;
 
   constructor() {
     this.bridge = this.tryLoadBridge();
@@ -100,6 +103,10 @@ export class SmbService {
 
   clearEventListener(): void {
     this.bridge?.clearEventListener?.();
+  }
+
+  setContext(context: common.UIAbilityContext): void {
+    this.context = context;
   }
 
   sanitizeProfile(profile: Partial<SmbConnectionProfile>): SmbConnectionProfile {
@@ -167,7 +174,13 @@ export class SmbService {
     if (configured !== 0) {
       throw new Error(this.getState().lastError || this.getCapability().blocker);
     }
-    const result = this.bridge?.openFile?.(entry.path) ?? '';
+    const cacheDir = (this.context as unknown as { cacheDir?: string })?.cacheDir
+      ?? (this.context as unknown as { filesDir?: string })?.filesDir
+      ?? '';
+    if (cacheDir.length === 0) {
+      throw new Error('无法获取应用缓存目录');
+    }
+    const result = this.bridge?.openFile?.(entry.path, cacheDir, entry.name) ?? '';
     if (result.length === 0) {
       throw new Error(this.getState().lastError || this.getCapability().blocker);
     }

@@ -20,6 +20,7 @@ third_party/libsmb2/
 - `SmbService` 能力声明与 `smb://` URI 构造
 - `StorageService` 中的 SMB profile 持久化
 - 独立 `smb_client_bridge` NAPI 模块和 `libsmb2` CMake 探测骨架
+- `libsmb2` 存在时的真实 `connect/list/download-to-cache` 分支
 
 当前仓库尚未完成：
 

@@ -17,6 +17,7 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     GlobalContext.getStorageService().setContext(this.context);
     GlobalContext.getBackgroundPlaybackService().setContext(this.context as unknown as common.UIAbilityContext);
+    GlobalContext.getSmbService().setContext(this.context as unknown as common.UIAbilityContext);
   }
 
   onDestroy(): void {
