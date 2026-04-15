@@ -59,6 +59,7 @@
 - 当前页面已支持在 `ArkUI Video` 与 `AVPlayer` 两种内核之间切换，用于逐步迁移验证。
 - Native 侧已补齐 `media_core` 分层骨架、NAPI 状态查询、事件回调和错误回传，桥接不再是纯 `Noop` stub。
 - 当前 Native 侧已补齐 `FFmpeg Demuxer / Decoder / Resampler / Converter / Queue / Sync / Drain` 代码路径。
+- 当前 Native 侧已补齐条件编译的 Harmony `NativeWindow renderer` 与 `OHAudio output` backend 接入位。
 - 当前 Native 桥接会明确暴露 `backendName/blocker/stage/metrics`，用于标识真实软解内核的剩余阻塞点。
 
 ## 当前未落地

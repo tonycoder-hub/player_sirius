@@ -679,6 +679,9 @@ std::unique_ptr<Decoder> CreateDefaultDecoder()
 
 std::unique_ptr<Renderer> CreateDefaultRenderer()
 {
+    if (auto platform_renderer = CreatePlatformRenderer()) {
+        return platform_renderer;
+    }
     return std::make_unique<PlaceholderRenderer>();
 }
 

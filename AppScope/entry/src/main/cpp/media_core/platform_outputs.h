@@ -41,7 +41,9 @@ public:
     virtual PlaybackMetrics Snapshot() const = 0;
 };
 
+std::unique_ptr<Renderer> CreatePlatformRenderer();
 std::unique_ptr<AudioOutput> CreateDefaultAudioOutput();
+std::unique_ptr<AudioOutput> CreatePlatformAudioOutput();
 std::unique_ptr<PlaybackStatsCollector> CreateDefaultStatsCollector();
 
 } // namespace player_sirius

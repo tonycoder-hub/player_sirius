@@ -17,6 +17,8 @@ echo "[3/4] native source snapshot"
 test -f AppScope/entry/src/main/cpp/CMakeLists.txt
 test -f AppScope/entry/src/main/cpp/native_player_bridge.cpp
 test -f AppScope/entry/src/main/cpp/smb_client_bridge.cpp
+test -f AppScope/entry/src/main/cpp/media_core/platform_audio_output.cpp
+test -f AppScope/entry/src/main/cpp/media_core/platform_video_output.cpp
 test -d AppScope/entry/src/main/cpp/media_core
 test -d third_party/libsmb2
 test -f third_party/libsmb2/upstream/CMakeLists.txt

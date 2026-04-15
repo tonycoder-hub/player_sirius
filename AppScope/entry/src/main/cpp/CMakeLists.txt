@@ -20,14 +20,52 @@ find_path(PLAYER_SIRIUS_NODE_API_INCLUDE_DIR
     /home/linuxbrew/.linuxbrew/include/node
 )
 
+find_path(PLAYER_SIRIUS_NATIVE_WINDOW_INCLUDE_DIR
+  NAMES native_window/external_window.h
+  PATHS
+    /usr/include
+    /usr/local/include
+    /opt/homebrew/include
+    /home/linuxbrew/.linuxbrew/include
+)
+
+find_path(PLAYER_SIRIUS_OH_AUDIO_INCLUDE_DIR
+  NAMES ohaudio/native_audiorenderer.h
+  PATHS
+    /usr/include
+    /usr/local/include
+    /opt/homebrew/include
+    /home/linuxbrew/.linuxbrew/include
+)
+
+find_library(PLAYER_SIRIUS_NATIVE_WINDOW_LIB
+  NAMES native_window libnative_window.so
+  PATHS
+    /usr/lib
+    /usr/local/lib
+    /opt/homebrew/lib
+    /home/linuxbrew/.linuxbrew/lib
+)
+
+find_library(PLAYER_SIRIUS_OH_AUDIO_LIB
+  NAMES ohaudio libohaudio.so
+  PATHS
+    /usr/lib
+    /usr/local/lib
+    /opt/homebrew/lib
+    /home/linuxbrew/.linuxbrew/lib
+)
+
 add_library(native_player_bridge SHARED
   native_player_bridge.cpp
   media_core/audio_resampler.cpp
   media_core/ffmpeg_decoder.cpp
   media_core/ffmpeg_demuxer.cpp
   media_core/media_pipeline.cpp
+  media_core/platform_audio_output.cpp
   media_core/player_core.cpp
   media_core/platform_outputs.cpp
+  media_core/platform_video_output.cpp
   media_core/soft_backend.cpp
   media_core/sync_controller.cpp
   media_core/video_converter.cpp
@@ -56,6 +94,8 @@ endif()
 
 set(PLAYER_SIRIUS_HAS_FFMPEG 0)
 set(PLAYER_SIRIUS_HAS_LIBSMB2 0)
+set(PLAYER_SIRIUS_HAS_OH_NATIVE_WINDOW 0)
+set(PLAYER_SIRIUS_HAS_OH_AUDIO 0)
 
 if (PLAYER_SIRIUS_ENABLE_FFMPEG)
   find_path(PLAYER_SIRIUS_FFMPEG_INCLUDE_DIR
@@ -119,6 +159,25 @@ endif()
 
 target_compile_definitions(native_player_bridge PRIVATE
   PLAYER_SIRIUS_HAS_FFMPEG=${PLAYER_SIRIUS_HAS_FFMPEG}
+)
+
+if (PLAYER_SIRIUS_NATIVE_WINDOW_INCLUDE_DIR AND PLAYER_SIRIUS_NATIVE_WINDOW_LIB)
+  set(PLAYER_SIRIUS_HAS_OH_NATIVE_WINDOW 1)
+  target_include_directories(native_player_bridge PRIVATE ${PLAYER_SIRIUS_NATIVE_WINDOW_INCLUDE_DIR})
+  target_link_libraries(native_player_bridge ${PLAYER_SIRIUS_NATIVE_WINDOW_LIB})
+  message(STATUS "Player Sirius: Harmony NativeWindow detected under ${PLAYER_SIRIUS_NATIVE_WINDOW_INCLUDE_DIR}")
+endif()
+
+if (PLAYER_SIRIUS_OH_AUDIO_INCLUDE_DIR AND PLAYER_SIRIUS_OH_AUDIO_LIB)
+  set(PLAYER_SIRIUS_HAS_OH_AUDIO 1)
+  target_include_directories(native_player_bridge PRIVATE ${PLAYER_SIRIUS_OH_AUDIO_INCLUDE_DIR})
+  target_link_libraries(native_player_bridge ${PLAYER_SIRIUS_OH_AUDIO_LIB})
+  message(STATUS "Player Sirius: Harmony OHAudio detected under ${PLAYER_SIRIUS_OH_AUDIO_INCLUDE_DIR}")
+endif()
+
+target_compile_definitions(native_player_bridge PRIVATE
+  PLAYER_SIRIUS_HAS_OH_NATIVE_WINDOW=${PLAYER_SIRIUS_HAS_OH_NATIVE_WINDOW}
+  PLAYER_SIRIUS_HAS_OH_AUDIO=${PLAYER_SIRIUS_HAS_OH_AUDIO}
 )
 
 if (PLAYER_SIRIUS_ENABLE_LIBSMB2)

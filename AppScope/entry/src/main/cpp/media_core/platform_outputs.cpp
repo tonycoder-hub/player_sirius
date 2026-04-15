@@ -188,6 +188,9 @@ private:
 
 std::unique_ptr<AudioOutput> CreateDefaultAudioOutput()
 {
+    if (auto platform_output = CreatePlatformAudioOutput()) {
+        return platform_output;
+    }
     return std::make_unique<PlaceholderAudioOutput>();
 }
 
