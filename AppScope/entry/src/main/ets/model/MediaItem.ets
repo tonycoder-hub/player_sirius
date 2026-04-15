@@ -11,6 +11,10 @@ export interface MediaItem {
   lastPlayedAt: number;
   playCount: number;
   isCompleted: boolean;
+  thumbnailUri?: string;
+  width?: number;
+  height?: number;
+  fileSizeBytes?: number;
 }
 
 export class MediaItemHelper {

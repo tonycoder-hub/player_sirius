@@ -20,6 +20,9 @@ import type { FtpEntry } from '../services/FtpService';
 import { FtpService } from '../services/FtpService';
 import type { DlnaDevice } from '../services/DlnaService';
 import { DlnaService } from '../services/DlnaService';
+import { BrightnessService } from '../services/BrightnessService';
+import { ThumbnailService } from '../services/ThumbnailService';
+import { LocalScanService } from '../services/LocalScanService';
 
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
@@ -70,6 +73,7 @@ struct Index {
   @State fitMode: string = 'contain';
   @State videoRotation: number = 0;
   @State playerVolume: number = 1.0;
+  @State playerBrightness: number = -1;
   @State subtitleEnabled: boolean = false;
   @State subtitleOffsetSeconds: number = 0;
   @State subtitleUri: string = '';
@@ -110,6 +114,7 @@ struct Index {
   @State gestureHint: string = '';
   @State kernelSelectionPolicy: string = 'auto';
   @State lastFallbackMessage: string = '';
+  @State nativeBridgeSummary: string = 'stub';
   @State playerKernelMode: string = 'video-component';
   @State avPlayerSurfaceId: string = '';
   @State videoSessionKey: number = 0;
@@ -119,6 +124,7 @@ struct Index {
   private storageService = GlobalContext.getStorageService();
   private permissionService: PermissionService = new PermissionService();
   private backgroundPlaybackService = GlobalContext.getBackgroundPlaybackService();
+  private nativePlayerBridgeService = GlobalContext.getNativePlayerBridgeService();
   private lastSessionUpdateAt: number = 0;
   private wasPlayingBeforeInterrupt: boolean = false;
   private volumeBeforeDuck: number | null = null;
@@ -133,6 +139,7 @@ struct Index {
     this.syncPlayerState();
     this.loadCollections();
     this.startStallMonitor();
+    this.initWindowBrightness();
   }
 
   aboutToDisappear(): void {
@@ -140,6 +147,7 @@ struct Index {
     this.avPlayerService.release();
     this.backgroundPlaybackService.ensureStopped();
     this.stopStallMonitor();
+    this.restoreSystemBrightness();
     this.setPreferredOrientation(window.Orientation.PORTRAIT);
   }
 
@@ -150,6 +158,8 @@ struct Index {
     this.avPlayerService.setSpeed(this.currentSpeed);
     this.avPlayerService.setVolume(this.playerVolume);
     this.updatePlaylist();
+    const capability = this.nativePlayerBridgeService.getCapability();
+    this.nativeBridgeSummary = `${capability.available ? '已加载' : '未加载'} · ${capability.version}`;
   }
 
   private async loadCollections(): Promise<void> {
@@ -158,6 +168,37 @@ struct Index {
     this.favoriteItems = this.libraryItems.filter((item: MediaItem) => item.isFavorite);
     this.folderNames = this.collectFolderNames(this.libraryItems);
     this.updateCurrentItemFromLibrary();
+    this.ensureLibraryThumbnails();
+  }
+
+  private async ensureLibraryThumbnails(): Promise<void> {
+    const context = this.getUiContext();
+    let changed = false;
+    for (const item of this.libraryItems) {
+      if (item.sourceType !== 'local' || (item.thumbnailUri && item.thumbnailUri.length > 0)) {
+        continue;
+      }
+      const thumbnailUri = await ThumbnailService.ensureThumbnail(context, item);
+      if (thumbnailUri.length > 0) {
+        item.thumbnailUri = thumbnailUri;
+        await this.storageService.upsertMediaItem(item);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.libraryItems = await this.storageService.getMediaLibrary();
+      this.favoriteItems = this.libraryItems.filter((item: MediaItem) => item.isFavorite);
+      this.folderNames = this.collectFolderNames(this.libraryItems);
+    }
+  }
+
+  private async initWindowBrightness(): Promise<void> {
+    this.playerBrightness = await BrightnessService.getWindowBrightness(this.getUiContext());
+  }
+
+  private async restoreSystemBrightness(): Promise<void> {
+    await BrightnessService.setWindowBrightness(this.getUiContext(), -1);
+    this.playerBrightness = -1;
   }
 
   private collectFolderNames(items: MediaItem[]): string[] {
@@ -203,6 +244,13 @@ struct Index {
       return `${Math.round(this.playerVolume * 100)}%`;
     }
     return this.playerVolume <= 0 ? '静音' : '跟随系统';
+  }
+
+  private getBrightnessDisplayText(): string {
+    if (this.playerBrightness < 0) {
+      return '跟随系统';
+    }
+    return `${Math.round(this.playerBrightness * 100)}%`;
   }
 
   private getVolumeDownLabel(): string {
@@ -846,6 +894,14 @@ struct Index {
       : (nextVolume <= 0 ? '已静音' : '已恢复音频输出');
   }
 
+  private adjustBrightness(delta: number): void {
+    const currentBrightness = this.playerBrightness < 0 ? 0.5 : this.playerBrightness;
+    const nextBrightness = Math.max(0, Math.min(currentBrightness + delta, 1));
+    this.playerBrightness = nextBrightness;
+    BrightnessService.setWindowBrightness(this.getUiContext(), nextBrightness);
+    this.gestureHint = `亮度 ${Math.round(nextBrightness * 100)}%`;
+  }
+
   private adjustProgress(delta: number): void {
     const nextTime = Math.max(0, Math.min(this.currentTime + delta, this.duration > 0 ? this.duration : 0));
     this.currentTime = nextTime;
@@ -1266,21 +1322,34 @@ struct Index {
         return;
       }
 
-      const photoPicker = new picker.PhotoViewPicker();
-      const result = await photoPicker.select({
-        MIMEType: picker.PhotoViewMIMETypes.VIDEO_TYPE,
-        maxSelectNumber: MAX_LIBRARY_IMPORT_COUNT
-      });
+      let uris: string[] = [];
+      const scanResult = await LocalScanService.pickFolderAndListVideos(this.getUiContext(), MAX_LIBRARY_IMPORT_COUNT);
+      if (scanResult.uris.length > 0) {
+        uris = scanResult.uris;
+        this.libraryMessage = scanResult.message;
+      } else {
+        const photoPicker = new picker.PhotoViewPicker();
+        const result = await photoPicker.select({
+          MIMEType: picker.PhotoViewMIMETypes.VIDEO_TYPE,
+          maxSelectNumber: MAX_LIBRARY_IMPORT_COUNT
+        });
+        uris = result.photoUris ?? [];
+        if (scanResult.message.length > 0 && uris.length > 0) {
+          this.libraryMessage = `${scanResult.message}，已回退到批量导入 ${uris.length} 个视频。`;
+        }
+      }
 
-      const uris = result.photoUris ?? [];
       if (uris.length === 0) {
         return;
       }
 
       const items = uris.map((uri: string) => this.createPlayableItem(uri, this.getFileNameFromUri(uri)));
       await this.storageService.saveMediaLibraryItems(items);
-      this.libraryMessage = `已导入 ${items.length} 个本地媒体，可在媒体库和文件夹视图中浏览。`;
+      if (this.libraryMessage.length === 0) {
+        this.libraryMessage = `已导入 ${items.length} 个本地媒体，可在媒体库和文件夹视图中浏览。`;
+      }
       await this.loadCollections();
+      await this.ensureLibraryThumbnails();
       this.activeLibraryTab = 'library';
       this.showLibrary = true;
     } catch (err) {
@@ -1676,7 +1745,12 @@ struct Index {
               if (Math.abs(event.offsetX) >= Math.abs(event.offsetY)) {
                 this.adjustProgress(event.offsetX > 0 ? 3 : -3);
               } else {
-                this.adjustVolume(event.offsetY < 0 ? 0.02 : -0.02);
+                const centerX = Number(event.fingerList && event.fingerList.length > 0 ? event.fingerList[0].globalX : 0);
+                if (centerX > 0 && centerX < 180) {
+                  this.adjustBrightness(event.offsetY < 0 ? 0.02 : -0.02);
+                } else {
+                  this.adjustVolume(event.offsetY < 0 ? 0.02 : -0.02);
+                }
               }
             })
             .onActionEnd(() => {
@@ -2021,6 +2095,10 @@ struct Index {
               .width('100%')
               .margin({ top: 4 });
             Text(`音量：${this.getVolumeDisplayText()} · 字幕：${this.currentSubtitleLabel} · 音轨：${this.currentAudioTrack}`)
+              .fontSize(12)
+              .width('100%')
+              .margin({ top: 4 });
+            Text(`亮度：${this.getBrightnessDisplayText()} · 手势：左亮度 / 右音量 / 横向进度`)
               .fontSize(12)
               .width('100%')
               .margin({ top: 4 });
@@ -2535,37 +2613,61 @@ struct Index {
         List({ space: 8 }) {
           ForEach(visibleItems, (item: MediaItem) => {
             ListItem() {
-              Column() {
-                Row() {
-                  Text(item.title)
-                    .fontSize(14)
-                    .maxLines(1)
-                    .textOverflow({ overflow: TextOverflow.Ellipsis })
-                    .layoutWeight(1);
-
-                  Text(item.isFavorite ? '已收藏' : '收藏')
-                    .fontSize(12)
-                    .fontColor(item.isFavorite ? '#F59E0B' : '#6B7280')
-                    .onClick(() => {
-                      this.toggleFavorite(item);
-                    });
+              Row() {
+                if (item.thumbnailUri && item.thumbnailUri.length > 0) {
+                  Image(item.thumbnailUri)
+                    .width(92)
+                    .height(56)
+                    .borderRadius(6)
+                    .objectFit(ImageFit.Cover)
+                    .margin({ right: 12 });
+                } else {
+                  Row() {
+                    Text('无封面')
+                      .fontSize(10)
+                      .fontColor('#6B7280');
+                  }
+                  .width(92)
+                  .height(56)
+                  .borderRadius(6)
+                  .backgroundColor('#E5E7EB')
+                  .justifyContent(FlexAlign.Center)
+                  .margin({ right: 12 });
                 }
-                .width('100%');
 
-                Text(`${item.sourceType === 'network' ? '网络流' : item.folderName} · ${item.isCompleted ? '已完成' : this.formatTime(item.lastPosition)}`)
-                  .fontSize(12)
-                  .fontColor(Color.Gray)
-                  .width('100%')
-                  .margin({ top: 4 });
+                Column() {
+                  Row() {
+                    Text(item.title)
+                      .fontSize(14)
+                      .maxLines(1)
+                      .textOverflow({ overflow: TextOverflow.Ellipsis })
+                      .layoutWeight(1);
 
-                Text(`最近播放：${this.formatDateTime(item.lastPlayedAt)}`)
-                  .fontSize(12)
-                  .fontColor(Color.Gray)
-                  .width('100%')
-                  .margin({ top: 4 });
+                    Text(item.isFavorite ? '已收藏' : '收藏')
+                      .fontSize(12)
+                      .fontColor(item.isFavorite ? '#F59E0B' : '#6B7280')
+                      .onClick(() => {
+                        this.toggleFavorite(item);
+                      });
+                  }
+                  .width('100%');
+
+                  Text(`${item.sourceType === 'network' ? '网络流' : item.folderName} · ${item.isCompleted ? '已完成' : this.formatTime(item.lastPosition)}`)
+                    .fontSize(12)
+                    .fontColor(Color.Gray)
+                    .width('100%')
+                    .margin({ top: 4 });
+
+                  Text(`最近播放：${this.formatDateTime(item.lastPlayedAt)}`)
+                    .fontSize(12)
+                    .fontColor(Color.Gray)
+                    .width('100%')
+                    .margin({ top: 4 });
+                }
+                .layoutWeight(1)
+                .alignItems(HorizontalAlign.Start);
               }
               .width('100%')
-              .alignItems(HorizontalAlign.Start)
               .padding({ left: 15, right: 15, top: 12, bottom: 12 })
               .borderRadius(8)
               .backgroundColor('#F8F8F8')
@@ -2616,10 +2718,16 @@ struct Index {
             Text(`音量：${this.getVolumeDisplayText()} · 倍速 ${this.currentSpeed}x`);
           }
           ListItem() {
+            Text(`亮度：${this.getBrightnessDisplayText()}`);
+          }
+          ListItem() {
             Text(`字幕：${this.currentSubtitleLabel} · 偏移 ${this.subtitleOffsetSeconds}s`);
           }
           ListItem() {
             Text(`音轨：${this.currentAudioTrack}`);
+          }
+          ListItem() {
+            Text(`Native 桥接：${this.nativeBridgeSummary}`);
           }
         }
         .width('90%')

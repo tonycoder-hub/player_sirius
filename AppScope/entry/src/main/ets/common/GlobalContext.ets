@@ -3,6 +3,7 @@ import { PlayerService } from '../services/PlayerService';
 import { PlayerKernelService } from '../services/PlayerKernelService';
 import { StorageService } from '../services/StorageService';
 import { BackgroundPlaybackService } from '../services/BackgroundPlaybackService';
+import { NativePlayerBridgeService } from '../services/NativePlayerBridgeService';
 
 export class GlobalContext {
   private static _avPlayerService: AVPlayerService | null = null;
@@ -10,6 +11,7 @@ export class GlobalContext {
   private static _playerKernelService: PlayerKernelService | null = null;
   private static _storageService: StorageService | null = null;
   private static _backgroundPlaybackService: BackgroundPlaybackService | null = null;
+  private static _nativePlayerBridgeService: NativePlayerBridgeService | null = null;
 
   static getAVPlayerService(): AVPlayerService {
     if (!this._avPlayerService) {
@@ -44,5 +46,12 @@ export class GlobalContext {
       this._backgroundPlaybackService = new BackgroundPlaybackService();
     }
     return this._backgroundPlaybackService;
+  }
+
+  static getNativePlayerBridgeService(): NativePlayerBridgeService {
+    if (!this._nativePlayerBridgeService) {
+      this._nativePlayerBridgeService = new NativePlayerBridgeService();
+    }
+    return this._nativePlayerBridgeService;
   }
 }

@@ -47,7 +47,11 @@ export class StorageService {
       isFavorite: item.isFavorite ?? false,
       lastPlayedAt: item.lastPlayedAt ?? item.addedTime ?? Date.now(),
       playCount: item.playCount ?? 0,
-      isCompleted: item.isCompleted ?? false
+      isCompleted: item.isCompleted ?? false,
+      thumbnailUri: item.thumbnailUri ?? '',
+      width: item.width ?? 0,
+      height: item.height ?? 0,
+      fileSizeBytes: item.fileSizeBytes ?? 0
     };
   }
 
