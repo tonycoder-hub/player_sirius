@@ -133,14 +133,16 @@
 - 缓冲状态、首帧耗时、弱网卡顿检测与自动重试。
 - 自动/手动播放内核选择，以及 `ArkUI Video` / `AVPlayer` / `Native Bridge` 之间的失败回退。
 - WebDAV、FTP 的目录浏览与缓存后播放。
-- DLNA 设备发现、URL 投送与 `Play/Pause/Stop` 基础控制。
-- 媒体库导入、文件夹筛选、缩略图缓存、基础元数据缓存。
+- DLNA 设备发现、URL 投送与 `Play/Pause/Stop`、状态刷新、进度跳转、音量控制。
+- 媒体库导入、文件夹筛选、缩略图缓存、基础元数据缓存、扫描目录记忆、增量重扫、失效清理。
 - 左侧亮度手势、右侧音量手势、横向进度快调。
+- 更完整的媒体信息面板，支持显示文件大小、进度、内核/桥接状态、缓冲统计和远端协议摘要。
+- `pre-push` 自检脚本与 GitHub Actions CI，默认执行文档快照和 Native `cmake configure/build` 检查。
 
 ### 已知限制
 
 - `WebDAV`、`FTP` 当前采用“下载到缓存后播放”，不是完整的远端流式播放实现。
-- `DLNA` 投屏目前是基础控制版，没有做状态订阅、进度查询、音量控制、设备兼容适配。
+- `DLNA` 投屏目前仍偏基础控制版，没有做状态订阅、完整设备兼容适配和长期稳定性治理。
 - 本地/缓存媒体投屏依赖应用内本地 HTTP 服务，设备必须能访问手机/平板的局域网地址。
 - 媒体库目录扫描当前优先尝试文件夹选择能力；若设备不支持，会回退到批量选择视频导入。
 - 弱网恢复当前以自动重试和基础缓冲指标为主，还没有完整 ABR/多级退避策略。
@@ -148,20 +150,23 @@
 ### 必须继续补的部分
 
 - **Native 播放内核本体**
-  - 当前已经有 ArkTS 桥接服务和 `cpp/NAPI` 骨架，且能进入主播放控制链。
-  - 当前已补齐 `media_core` 分层、`demuxer / decoder / renderer / audio-output / clock` 五段式 pipeline 骨架、NAPI 状态查询、事件回调、基础 metrics 透传和 `FFmpeg` 接入骨架。
-  - 但仓库内仍未放入可用的 `FFmpeg/libav*` 产物，也还没有真正的 `demux / decoder / render / A/V sync` 管线。
-  - 现阶段更准确的状态是“Native 工程骨架与依赖接入口已打通”，不是“Native 播放器已完成”。
+  - 当前已经有 ArkTS 桥接服务和 `cpp/NAPI` 主控制链。
+  - 当前已补齐 `media_core` 分层、`Demuxer / Decoder / AudioResampler / VideoConverter / packet-frame queue / playback worker / drain / sync-controller` 代码路径。
+  - 当前已补齐条件编译的 Harmony `NativeWindow renderer` 与 `OHAudio output` backend 接入位。
+  - Native 桥接已支持更细的 `stage / metrics / queue depth / audio clock / video clock / completed` 状态透传。
+  - 但仓库内仍未放入可用的 `FFmpeg/libav*` 产物，且当前环境没有 Harmony `native_window/ohaudio` 头文件与库，所以这些真实 backend 还未被启用。
+  - 现阶段更准确的状态是“FFmpeg Native 内核主体代码已写入仓库，但仍受外部依赖约束”，不是“Native 播放器已完整可用”。
 
 - **SMB / CIFS**
   - 当前已补齐 `SMB` 面板、配置保存、服务接口、独立 `smb_client_bridge`，并 vendoring 了 `libsmb2` 上游源码。
   - 构建时会优先尝试从 `third_party/libsmb2/upstream` 编译，再退回到预编译 `include/lib` 模式。
-  - 真实 `connect / list / download-to-cache` 分支已经写入 bridge，但当前环境仍未完成编译和真机验证。
+  - 真实 `connect / list / download-to-cache` 分支已经写入 bridge，且本机已完成编译级验证。
+  - 当前仍缺目标平台运行级验证与完整 NAS 联调。
 
 - **更完整的工程化能力**
   - 媒体库仍缺少目录变更监听、增量索引和更完整的元数据抽取。
   - 投屏仍缺少完整会话管理、状态同步和失败恢复。
-  - 回归目前以文档清单为主，尚未转成自动化测试或脚本化检查。
+  - 当前已有脚本化检查和 CI，但仍缺完整单元测试、协议栈回归和真机回归体系。
 
 ## 发布判断建议
 
