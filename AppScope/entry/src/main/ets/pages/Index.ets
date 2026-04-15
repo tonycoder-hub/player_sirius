@@ -1,4 +1,4 @@
-import { picker } from '@kit.CoreFileKit';
+import { picker, fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { media } from '@kit.MediaKit';
@@ -363,6 +363,86 @@ struct Index {
 
   private getVolumeUpLabel(): string {
     return this.supportsPreciseVolumeControl() ? '+音量' : '开声';
+  }
+
+  private formatFileSize(bytes?: number): string {
+    const value = Number(bytes ?? 0);
+    if (value <= 0) {
+      return '未知';
+    }
+    if (value >= 1024 * 1024 * 1024) {
+      return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    }
+    if (value >= 1024 * 1024) {
+      return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+    }
+    if (value >= 1024) {
+      return `${(value / 1024).toFixed(1)} KB`;
+    }
+    return `${value} B`;
+  }
+
+  private getPlaybackProgressText(): string {
+    const ratio = this.duration > 0 ? Math.min(100, Math.max(0, (this.currentTime / this.duration) * 100)) : 0;
+    return `${this.formatTime(this.currentTime)} / ${this.formatTime(this.duration)} · ${Math.round(ratio)}%`;
+  }
+
+  private getSourceDetailText(item: MediaItem): string {
+    if (item.sourceType === 'local') {
+      return item.importRootUri && item.importRootUri.length > 0 ? `导入源：${item.importRootUri}` : '本地导入';
+    }
+    if (item.uri.startsWith('smb://') || item.folderName === 'SMB / NAS') {
+      return 'SMB / NAS';
+    }
+    if (item.uri.startsWith('http://') || item.uri.startsWith('https://')) {
+      try {
+        const parsed = new URL(item.uri);
+        return `${parsed.protocol.replace(':', '').toUpperCase()} · ${parsed.host}`;
+      } catch {
+        return '网络流';
+      }
+    }
+    return item.folderName;
+  }
+
+  private getDimensionText(item: MediaItem): string {
+    const width = Number(item.width ?? 0);
+    const height = Number(item.height ?? 0);
+    if (width > 0 && height > 0) {
+      return `${width} x ${height}`;
+    }
+    return '未知';
+  }
+
+  private async refreshCurrentMediaMetadata(): Promise<void> {
+    if (!this.currentMediaItem) {
+      this.gestureHint = '当前没有可刷新的媒体';
+      return;
+    }
+    const item = { ...this.currentMediaItem };
+    try {
+      if (item.sourceType === 'local') {
+        try {
+          const stat = fs.statSync(item.uri);
+          item.fileSizeBytes = Number((stat as Record<string, number>).size ?? item.fileSizeBytes ?? 0);
+        } catch {
+          // ignore local stat failures and keep existing data
+        }
+        if ((!item.thumbnailUri || item.thumbnailUri.length === 0) || !item.width || !item.height) {
+          const thumbnailUri = await ThumbnailService.ensureThumbnail(this.getUiContext(), item);
+          if (thumbnailUri.length > 0) {
+            item.thumbnailUri = thumbnailUri;
+          }
+        }
+      }
+      this.currentMediaItem = item;
+      await this.storageService.upsertMediaItem(item);
+      await this.loadCollections();
+      this.gestureHint = '媒体元数据已刷新';
+    } catch (err) {
+      console.error(`Refresh current media metadata failed: ${err}`);
+      this.gestureHint = '媒体元数据刷新失败';
+    }
   }
 
   private supportsSubtitleFeature(): boolean {
@@ -3103,6 +3183,14 @@ struct Index {
         .fontWeight(FontWeight.Medium)
         .margin({ top: 20, bottom: 16 });
 
+      Button('刷新元数据')
+        .fontSize(12)
+        .margin({ bottom: 12 })
+        .enabled(this.currentMediaItem !== null)
+        .onClick(() => {
+          this.refreshCurrentMediaMetadata();
+        });
+
       if (this.currentMediaItem) {
         List({ space: 10 }) {
           ListItem() {
@@ -3115,7 +3203,25 @@ struct Index {
             Text(`来源：${this.currentMediaItem.sourceType === 'network' ? '网络流' : '本地文件'}`);
           }
           ListItem() {
-            Text(`文件夹：${this.currentMediaItem.folderName}`);
+            Text(`来源详情：${this.getSourceDetailText(this.currentMediaItem)}`);
+          }
+          ListItem() {
+            Text(`文件夹：${this.currentMediaItem.folderName || '未知'}`);
+          }
+          ListItem() {
+            Text(`时长/进度：${this.getPlaybackProgressText()}`);
+          }
+          ListItem() {
+            Text(`文件大小：${this.formatFileSize(this.currentMediaItem.fileSizeBytes)}`);
+          }
+          ListItem() {
+            Text(`分辨率：${this.getDimensionText(this.currentMediaItem)}`);
+          }
+          ListItem() {
+            Text(`播放统计：${this.currentMediaItem.playCount} 次 · ${this.currentMediaItem.isCompleted ? '已看完' : '未看完'}`);
+          }
+          ListItem() {
+            Text(`时间信息：添加于 ${this.formatDateTime(this.currentMediaItem.addedTime)} · 最近播放 ${this.formatDateTime(this.currentMediaItem.lastPlayedAt)}`);
           }
           ListItem() {
             Text(`内核：${this.getKernelStatusText()}`);
@@ -3127,16 +3233,28 @@ struct Index {
             Text(`音量：${this.getVolumeDisplayText()} · 倍速 ${this.currentSpeed}x`);
           }
           ListItem() {
-            Text(`亮度：${this.getBrightnessDisplayText()}`);
+            Text(`亮度：${this.getBrightnessDisplayText()} · 横屏 ${this.isLandscapeMode ? '是' : '否'}`);
           }
           ListItem() {
-            Text(`字幕：${this.currentSubtitleLabel} · 偏移 ${this.subtitleOffsetSeconds}s`);
+            Text(`字幕：${this.currentSubtitleLabel} · 偏移 ${this.subtitleOffsetSeconds}s · 文件 ${this.getSubtitleFileName()}`);
           }
           ListItem() {
-            Text(`音轨：${this.currentAudioTrack}`);
+            Text(`音轨：${this.currentAudioTrack} · 可枚举 ${this.audioTracks.length} 条`);
           }
           ListItem() {
             Text(`Native 桥接：${this.nativeBridgeSummary}`);
+          }
+          ListItem() {
+            Text(`SMB 桥接：${this.smbBridgeSummary}`);
+          }
+          ListItem() {
+            Text(`缓冲与码率：缓冲 ${this.bufferPercent}% · 缓存 ${this.cachedDurationSeconds.toFixed(1)}s · 首帧 ${this.firstFrameCostMs}ms`);
+          }
+          ListItem() {
+            Text(`网络提示：${this.weakNetHint.length > 0 ? this.weakNetHint : '无'}`);
+          }
+          ListItem() {
+            Text(`远端会话：DLNA ${this.dlnaTransportState} · WebDAV ${this.webDavPath} · FTP ${this.ftpPath} · SMB ${this.smbPath}`);
           }
         }
         .width('90%')

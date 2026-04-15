@@ -21,7 +21,7 @@ test -d AppScope/entry/src/main/cpp/media_core
 test -d third_party/libsmb2
 test -f third_party/libsmb2/upstream/CMakeLists.txt
 
-echo "[4/4] optional cmake configure"
+echo "[4/4] optional cmake configure/build"
 cmake_bin=""
 if command -v cmake >/dev/null 2>&1; then
   cmake_bin="$(command -v cmake)"
@@ -31,7 +31,8 @@ fi
 
 if [ -n "$cmake_bin" ]; then
   "$cmake_bin" -S AppScope/entry/src/main/cpp -B /tmp/player_sirius_native_cmake_check >/dev/null
-  echo "cmake configure: ok"
+  "$cmake_bin" --build /tmp/player_sirius_native_cmake_check --target smb_client_bridge native_player_bridge -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)" >/dev/null
+  echo "cmake configure/build: ok"
 else
   echo "cmake not found, skip configure"
 fi

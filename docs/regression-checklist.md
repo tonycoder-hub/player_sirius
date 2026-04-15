@@ -60,13 +60,18 @@
 - 清理失效条目后，不会误删网络流和手动导入项
 - 支持文件夹筛选
 - 本地视频会生成首帧缩略图缓存
-- 媒体信息面板可显示基础元数据
+- 媒体信息面板可显示文件大小、进度、内核、桥接状态、缓冲统计和远端协议摘要
 
 ## Native 桥接
 
 - Native 桥接摘要可显示 `backend / state / stage / metrics`
 - Native 失败时可显示 `errorStage`
 - `FFmpeg` 未接入时，Native 能返回明确 blocker 而不是假成功
+
+## 工程化
+
+- `bash scripts/pre-push-check.sh` 能通过
+- `cmake` 可配置并编译 `smb_client_bridge` 和 `native_player_bridge`
 
 ## 亮度与手势
 
