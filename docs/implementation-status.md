@@ -30,7 +30,7 @@
 - 支持 FTP 浏览目录、下载到缓存并播放。
 - 支持 DLNA 设备发现、投送、播放/暂停/停止、状态刷新、进度跳转和音量控制。
 - 已支持 SMB 连接配置输入、配置保存、独立 Native bridge 和 `libsmb2` 依赖接入口。
-- 当 `libsmb2` 依赖到位后，当前 bridge 会进入真实 `connect/list/download-to-cache` 分支。
+- 已 vendoring `libsmb2` 上游源码；当构建环境可用时，当前 bridge 会进入真实 `connect/list/download-to-cache` 分支。
 
 ### P3 字幕与音轨
 

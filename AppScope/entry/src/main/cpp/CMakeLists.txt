@@ -6,6 +6,7 @@ get_filename_component(PLAYER_SIRIUS_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.
 set(PLAYER_SIRIUS_THIRD_PARTY_ROOT "${PLAYER_SIRIUS_REPO_ROOT}/third_party")
 set(PLAYER_SIRIUS_FFMPEG_ROOT "${PLAYER_SIRIUS_THIRD_PARTY_ROOT}/ffmpeg")
 set(PLAYER_SIRIUS_LIBSMB2_ROOT "${PLAYER_SIRIUS_THIRD_PARTY_ROOT}/libsmb2")
+set(PLAYER_SIRIUS_LIBSMB2_SOURCE_DIR "${PLAYER_SIRIUS_LIBSMB2_ROOT}/upstream")
 
 option(PLAYER_SIRIUS_ENABLE_FFMPEG "Enable FFmpeg backend lookup for Native media core" ON)
 option(PLAYER_SIRIUS_ENABLE_LIBSMB2 "Enable libsmb2 backend lookup for SMB bridge" ON)
@@ -99,27 +100,38 @@ target_compile_definitions(native_player_bridge PRIVATE
 )
 
 if (PLAYER_SIRIUS_ENABLE_LIBSMB2)
-  find_path(PLAYER_SIRIUS_LIBSMB2_INCLUDE_DIR
-    NAMES smb2/smb2.h
-    PATHS
-      "${PLAYER_SIRIUS_LIBSMB2_ROOT}/include"
-    NO_DEFAULT_PATH
-  )
-
-  find_library(PLAYER_SIRIUS_LIBSMB2_LIB
-    NAMES smb2 libsmb2
-    PATHS
-      "${PLAYER_SIRIUS_LIBSMB2_ROOT}/lib"
-    NO_DEFAULT_PATH
-  )
-
-  if (PLAYER_SIRIUS_LIBSMB2_INCLUDE_DIR AND PLAYER_SIRIUS_LIBSMB2_LIB)
+  if (EXISTS "${PLAYER_SIRIUS_LIBSMB2_SOURCE_DIR}/CMakeLists.txt")
     set(PLAYER_SIRIUS_HAS_LIBSMB2 1)
-    target_include_directories(smb_client_bridge PRIVATE ${PLAYER_SIRIUS_LIBSMB2_INCLUDE_DIR})
-    target_link_libraries(smb_client_bridge ${PLAYER_SIRIUS_LIBSMB2_LIB})
-    message(STATUS "Player Sirius: libsmb2 detected under ${PLAYER_SIRIUS_LIBSMB2_ROOT}")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(ENABLE_LIBKRB5 OFF CACHE BOOL "" FORCE)
+    set(ENABLE_GSSAPI OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${PLAYER_SIRIUS_LIBSMB2_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/libsmb2_build" EXCLUDE_FROM_ALL)
+    target_link_libraries(smb_client_bridge smb2)
+    message(STATUS "Player Sirius: using vendored libsmb2 source under ${PLAYER_SIRIUS_LIBSMB2_SOURCE_DIR}")
   else()
-    message(STATUS "Player Sirius: libsmb2 not found under ${PLAYER_SIRIUS_LIBSMB2_ROOT}; using placeholder SMB bridge")
+    find_path(PLAYER_SIRIUS_LIBSMB2_INCLUDE_DIR
+      NAMES smb2/smb2.h
+      PATHS
+        "${PLAYER_SIRIUS_LIBSMB2_ROOT}/include"
+      NO_DEFAULT_PATH
+    )
+
+    find_library(PLAYER_SIRIUS_LIBSMB2_LIB
+      NAMES smb2 libsmb2
+      PATHS
+        "${PLAYER_SIRIUS_LIBSMB2_ROOT}/lib"
+      NO_DEFAULT_PATH
+    )
+
+    if (PLAYER_SIRIUS_LIBSMB2_INCLUDE_DIR AND PLAYER_SIRIUS_LIBSMB2_LIB)
+      set(PLAYER_SIRIUS_HAS_LIBSMB2 1)
+      target_include_directories(smb_client_bridge PRIVATE ${PLAYER_SIRIUS_LIBSMB2_INCLUDE_DIR})
+      target_link_libraries(smb_client_bridge ${PLAYER_SIRIUS_LIBSMB2_LIB})
+      message(STATUS "Player Sirius: using prebuilt libsmb2 under ${PLAYER_SIRIUS_LIBSMB2_ROOT}")
+    else()
+      message(STATUS "Player Sirius: libsmb2 source/lib not found under ${PLAYER_SIRIUS_LIBSMB2_ROOT}; using placeholder SMB bridge")
+    endif()
   endif()
 endif()
 

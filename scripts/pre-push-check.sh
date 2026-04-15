@@ -19,6 +19,7 @@ test -f AppScope/entry/src/main/cpp/native_player_bridge.cpp
 test -f AppScope/entry/src/main/cpp/smb_client_bridge.cpp
 test -d AppScope/entry/src/main/cpp/media_core
 test -d third_party/libsmb2
+test -f third_party/libsmb2/upstream/CMakeLists.txt
 
 echo "[4/4] optional cmake configure"
 if command -v cmake >/dev/null 2>&1; then

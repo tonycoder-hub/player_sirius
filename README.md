@@ -154,9 +154,9 @@
   - 现阶段更准确的状态是“Native 工程骨架与依赖接入口已打通”，不是“Native 播放器已完成”。
 
 - **SMB / CIFS**
-  - 当前已补齐 `SMB` 面板、配置保存、服务接口、独立 `smb_client_bridge` 和 `libsmb2` 依赖目录约定。
-  - 当仓库中放入可用的 `libsmb2` 头文件与动态库后，bridge 会走真实 `connect / list / download-to-cache` 分支。
-  - 但当前仓库仍未放入这些依赖，因此这条链路还没有完成编译和真机验证。
+  - 当前已补齐 `SMB` 面板、配置保存、服务接口、独立 `smb_client_bridge`，并 vendoring 了 `libsmb2` 上游源码。
+  - 构建时会优先尝试从 `third_party/libsmb2/upstream` 编译，再退回到预编译 `include/lib` 模式。
+  - 真实 `connect / list / download-to-cache` 分支已经写入 bridge，但当前环境仍未完成编译和真机验证。
 
 - **更完整的工程化能力**
   - 媒体库仍缺少目录变更监听、增量索引和更完整的元数据抽取。
