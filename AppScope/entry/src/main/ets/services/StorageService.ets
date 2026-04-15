@@ -2,11 +2,13 @@ import { preferences } from '@kit.ArkData';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import type { MediaItem } from '../model/MediaItem';
+import type { SmbConnectionProfile } from './SmbService';
 
 const PREFERENCES_NAME = 'player_sirius_prefs';
 const KEY_HISTORY = 'play_history';
 const KEY_LIBRARY = 'media_library';
 const KEY_LIBRARY_ROOTS = 'media_library_roots';
+const KEY_SMB_PROFILES = 'smb_profiles';
 const MAX_HISTORY_SIZE = 50;
 const MAX_LIBRARY_SIZE = 200;
 
@@ -108,6 +110,19 @@ export class StorageService {
     const prefs = await this.getPreferences();
     await prefs.put(key, JSON.stringify(values));
     await prefs.flush();
+  }
+
+  private createDefaultSmbProfile(profile: Partial<SmbConnectionProfile>): SmbConnectionProfile {
+    return {
+      id: profile.id ?? `${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+      name: profile.name?.trim() || profile.share?.trim() || profile.host?.trim() || 'SMB 连接',
+      host: profile.host?.trim() || '',
+      port: Number(profile.port) > 0 ? Number(profile.port) : 445,
+      share: profile.share?.trim() || '',
+      username: profile.username?.trim() || '',
+      password: profile.password ?? '',
+      path: profile.path?.trim() || '/'
+    };
   }
 
   private upsertItems(items: MediaItem[], incoming: MediaItem, sortByLastPlayed: boolean): MediaItem[] {
@@ -242,6 +257,51 @@ export class StorageService {
       const message = err instanceof Error ? err.message : JSON.stringify(err);
       console.error(`Cleanup media library failed: ${message}`);
       return 0;
+    }
+  }
+
+  async getSmbProfiles(): Promise<SmbConnectionProfile[]> {
+    try {
+      const prefs = await this.getPreferences();
+      const rawValue = await prefs.get(KEY_SMB_PROFILES, '[]');
+      const parsed = JSON.parse(rawValue as string) as Partial<SmbConnectionProfile>[];
+      return parsed.map((profile: Partial<SmbConnectionProfile>) => this.createDefaultSmbProfile(profile));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Get SMB profiles failed: ${message}`);
+      return [];
+    }
+  }
+
+  async saveSmbProfile(profile: SmbConnectionProfile): Promise<void> {
+    try {
+      const existing = await this.getSmbProfiles();
+      const next = [...existing];
+      const normalized = this.createDefaultSmbProfile(profile);
+      const index = next.findIndex((item: SmbConnectionProfile) => item.id === normalized.id);
+      if (index >= 0) {
+        next[index] = normalized;
+      } else {
+        next.unshift(normalized);
+      }
+      const prefs = await this.getPreferences();
+      await prefs.put(KEY_SMB_PROFILES, JSON.stringify(next.slice(0, 10)));
+      await prefs.flush();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Save SMB profile failed: ${message}`);
+    }
+  }
+
+  async deleteSmbProfile(profileId: string): Promise<void> {
+    try {
+      const next = (await this.getSmbProfiles()).filter((profile: SmbConnectionProfile) => profile.id !== profileId);
+      const prefs = await this.getPreferences();
+      await prefs.put(KEY_SMB_PROFILES, JSON.stringify(next));
+      await prefs.flush();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Delete SMB profile failed: ${message}`);
     }
   }
 

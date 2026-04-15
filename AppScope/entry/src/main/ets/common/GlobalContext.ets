@@ -5,6 +5,7 @@ import { StorageService } from '../services/StorageService';
 import { BackgroundPlaybackService } from '../services/BackgroundPlaybackService';
 import { NativePlayerBridgeService } from '../services/NativePlayerBridgeService';
 import { LocalMediaHttpServerService } from '../services/LocalMediaHttpServerService';
+import { SmbService } from '../services/SmbService';
 
 export class GlobalContext {
   private static _avPlayerService: AVPlayerService | null = null;
@@ -14,6 +15,7 @@ export class GlobalContext {
   private static _backgroundPlaybackService: BackgroundPlaybackService | null = null;
   private static _nativePlayerBridgeService: NativePlayerBridgeService | null = null;
   private static _localMediaHttpServerService: LocalMediaHttpServerService | null = null;
+  private static _smbService: SmbService | null = null;
 
   static getAVPlayerService(): AVPlayerService {
     if (!this._avPlayerService) {
@@ -62,5 +64,12 @@ export class GlobalContext {
       this._localMediaHttpServerService = new LocalMediaHttpServerService();
     }
     return this._localMediaHttpServerService;
+  }
+
+  static getSmbService(): SmbService {
+    if (!this._smbService) {
+      this._smbService = new SmbService();
+    }
+    return this._smbService;
   }
 }

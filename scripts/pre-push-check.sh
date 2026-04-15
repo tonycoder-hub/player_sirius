@@ -11,11 +11,13 @@ echo "[2/4] docs snapshot"
 test -f docs/implementation-status.md
 test -f docs/regression-checklist.md
 test -f docs/ffmpeg-integration.md
+test -f docs/smb-integration.md
 
 echo "[3/4] native source snapshot"
 test -f AppScope/entry/src/main/cpp/CMakeLists.txt
 test -f AppScope/entry/src/main/cpp/native_player_bridge.cpp
 test -d AppScope/entry/src/main/cpp/media_core
+test -d third_party/libsmb2
 
 echo "[4/4] optional cmake configure"
 if command -v cmake >/dev/null 2>&1; then

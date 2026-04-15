@@ -20,6 +20,7 @@ import type { FtpEntry } from '../services/FtpService';
 import { FtpService } from '../services/FtpService';
 import type { DlnaDevice, DlnaPlaybackStatus } from '../services/DlnaService';
 import { DlnaService } from '../services/DlnaService';
+import type { SmbConnectionProfile, SmbEntry } from '../services/SmbService';
 import { BrightnessService } from '../services/BrightnessService';
 import { ThumbnailService } from '../services/ThumbnailService';
 import { LocalScanService } from '../services/LocalScanService';
@@ -103,6 +104,18 @@ struct Index {
   @State ftpEntries: FtpEntry[] = [];
   @State ftpMessage: string = '';
   @State ftpLoading: boolean = false;
+  @State smbProfileName: string = '';
+  @State smbHost: string = '';
+  @State smbPort: number = 445;
+  @State smbShare: string = '';
+  @State smbUsername: string = '';
+  @State smbPassword: string = '';
+  @State smbPath: string = '/';
+  @State smbEntries: SmbEntry[] = [];
+  @State smbProfiles: SmbConnectionProfile[] = [];
+  @State smbSelectedProfileId: string = '';
+  @State smbMessage: string = '';
+  @State smbLoading: boolean = false;
   @State dlnaDevices: DlnaDevice[] = [];
   @State dlnaMessage: string = '';
   @State dlnaLoading: boolean = false;
@@ -133,6 +146,7 @@ struct Index {
   private backgroundPlaybackService = GlobalContext.getBackgroundPlaybackService();
   private nativePlayerBridgeService = GlobalContext.getNativePlayerBridgeService();
   private localMediaHttpServerService: LocalMediaHttpServerService = GlobalContext.getLocalMediaHttpServerService();
+  private smbService = GlobalContext.getSmbService();
   private lastSessionUpdateAt: number = 0;
   private wasPlayingBeforeInterrupt: boolean = false;
   private volumeBeforeDuck: number | null = null;
@@ -227,6 +241,7 @@ struct Index {
   private async loadCollections(): Promise<void> {
     this.historyItems = await this.storageService.getPlayHistory();
     this.libraryItems = await this.storageService.getMediaLibrary();
+    this.smbProfiles = await this.storageService.getSmbProfiles();
     this.favoriteItems = this.libraryItems.filter((item: MediaItem) => item.isFavorite);
     this.folderNames = this.collectFolderNames(this.libraryItems);
     this.updateCurrentItemFromLibrary();
@@ -891,6 +906,93 @@ struct Index {
       this.dlnaMessage = `已让 ${device.friendlyName} 停止`;
     } catch (err) {
       this.dlnaMessage = (err as Error)?.message || '停止控制失败';
+    }
+  }
+
+  private buildCurrentSmbProfile(): SmbConnectionProfile {
+    return this.smbService.sanitizeProfile({
+      id: this.smbSelectedProfileId,
+      name: this.smbProfileName,
+      host: this.smbHost,
+      port: this.smbPort,
+      share: this.smbShare,
+      username: this.smbUsername,
+      password: this.smbPassword,
+      path: this.smbPath
+    });
+  }
+
+  private applySmbProfile(profile: SmbConnectionProfile): void {
+    this.smbSelectedProfileId = profile.id;
+    this.smbProfileName = profile.name;
+    this.smbHost = profile.host;
+    this.smbPort = profile.port;
+    this.smbShare = profile.share;
+    this.smbUsername = profile.username;
+    this.smbPassword = profile.password;
+    this.smbPath = profile.path;
+  }
+
+  private async saveCurrentSmbProfile(): Promise<void> {
+    const profile = this.buildCurrentSmbProfile();
+    const validationError = this.smbService.validateProfile(profile);
+    if (validationError.length > 0) {
+      this.smbMessage = validationError;
+      return;
+    }
+    await this.storageService.saveSmbProfile(profile);
+    this.smbProfiles = await this.storageService.getSmbProfiles();
+    this.smbSelectedProfileId = profile.id;
+    this.smbMessage = `已保存 SMB 连接：${profile.name}`;
+  }
+
+  private async deleteSelectedSmbProfile(): Promise<void> {
+    if (this.smbSelectedProfileId.length === 0) {
+      this.smbMessage = '请先选择已保存的 SMB 连接。';
+      return;
+    }
+    await this.storageService.deleteSmbProfile(this.smbSelectedProfileId);
+    this.smbProfiles = await this.storageService.getSmbProfiles();
+    this.smbSelectedProfileId = '';
+    this.smbProfileName = '';
+    this.smbMessage = '已删除 SMB 连接配置。';
+  }
+
+  private async listSmbDirectory(): Promise<void> {
+    this.smbLoading = true;
+    try {
+      const profile = this.buildCurrentSmbProfile();
+      this.smbEntries = await this.smbService.listDirectory(profile);
+      this.smbPath = profile.path;
+      this.smbMessage = this.smbEntries.length > 0
+        ? `已连接 ${profile.host}/${profile.share}，当前目录 ${profile.path}`
+        : '当前目录为空';
+    } catch (err) {
+      this.smbEntries = [];
+      this.smbMessage = (err as Error)?.message || 'SMB 目录浏览失败。';
+    } finally {
+      this.smbLoading = false;
+    }
+  }
+
+  private async openSmbEntry(entry: SmbEntry): Promise<void> {
+    const profile = this.buildCurrentSmbProfile();
+    if (entry.isDirectory) {
+      this.smbPath = entry.path;
+      await this.listSmbDirectory();
+      return;
+    }
+    try {
+      const smbUri = await this.smbService.openFile(profile, entry);
+      const item = this.createPlayableItem(smbUri, entry.name);
+      item.sourceType = 'network';
+      item.folderName = 'SMB / NAS';
+      await this.storageService.upsertMediaItem(item);
+      await this.loadCollections();
+      this.showRemotePanel = false;
+      await this.requestOpenItem(item);
+    } catch (err) {
+      this.smbMessage = (err as Error)?.message || 'SMB 文件打开失败。';
     }
   }
 
@@ -3170,7 +3272,7 @@ struct Index {
   @Builder
   RemotePanelBuilder() {
     Column() {
-      Text('远端：WebDAV / FTP')
+      Text('远端：WebDAV / FTP / SMB')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
         .margin({ top: 20, bottom: 12 });
@@ -3190,6 +3292,14 @@ struct Index {
           .fontColor(this.remoteMode === 'ftp' ? Color.White : Color.Black)
           .onClick(() => {
             this.remoteMode = 'ftp';
+          });
+        Button('SMB')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .backgroundColor(this.remoteMode === 'smb' ? '#007DFF' : '#F3F4F6')
+          .fontColor(this.remoteMode === 'smb' ? Color.White : Color.Black)
+          .onClick(() => {
+            this.remoteMode = 'smb';
           });
       }
       .width('90%')
@@ -3287,7 +3397,7 @@ struct Index {
         .fontColor('#6B7280')
         .width('90%')
         .margin({ top: 12 });
-      } else {
+      } else if (this.remoteMode === 'ftp') {
         TextInput({ text: this.ftpHost, placeholder: 'FTP 主机，例如 192.168.1.2' })
           .width('90%')
           .backgroundColor('#F3F4F6')
@@ -3383,6 +3493,178 @@ struct Index {
         .height('58%');
 
         Text('说明：FTP 文件会先下载到缓存再播放（当前为最小实现：PASV + MLSD/LIST + RETR）。')
+          .fontSize(11)
+          .fontColor('#6B7280')
+          .width('90%')
+          .margin({ top: 12 });
+      } else {
+        TextInput({ text: this.smbProfileName, placeholder: '配置名称（可选）' })
+          .width('90%')
+          .backgroundColor('#F3F4F6')
+          .borderRadius(10)
+          .onChange((value: string) => {
+            this.smbProfileName = value;
+          });
+
+        Row() {
+          TextInput({ text: this.smbHost, placeholder: 'SMB 主机，例如 192.168.1.10' })
+            .layoutWeight(2)
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.smbHost = value;
+            });
+
+          TextInput({ text: this.smbPort.toString(), placeholder: '端口' })
+            .layoutWeight(1)
+            .margin({ left: 10 })
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.smbPort = Number(value) || 445;
+            });
+        }
+        .width('90%')
+        .margin({ top: 10 });
+
+        Row() {
+          TextInput({ text: this.smbShare, placeholder: '共享名称，例如 Movies' })
+            .layoutWeight(1)
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.smbShare = value;
+            });
+
+          TextInput({ text: this.smbPath, placeholder: '路径，例如 / 或 /TV/' })
+            .layoutWeight(1)
+            .margin({ left: 10 })
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.smbPath = value;
+            });
+        }
+        .width('90%')
+        .margin({ top: 10 });
+
+        Row() {
+          TextInput({ text: this.smbUsername, placeholder: '用户名（可选）' })
+            .layoutWeight(1)
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.smbUsername = value;
+            });
+
+          TextInput({ text: this.smbPassword, placeholder: '密码（可选）' })
+            .layoutWeight(1)
+            .margin({ left: 10 })
+            .backgroundColor('#F3F4F6')
+            .borderRadius(10)
+            .onChange((value: string) => {
+              this.smbPassword = value;
+            });
+        }
+        .width('90%')
+        .margin({ top: 10 });
+
+        Row() {
+          Button('保存配置')
+            .fontSize(12)
+            .onClick(() => {
+              this.saveCurrentSmbProfile();
+            });
+
+          Button('列目录')
+            .fontSize(12)
+            .margin({ left: 8 })
+            .enabled(!this.smbLoading)
+            .onClick(() => {
+              this.listSmbDirectory();
+            });
+
+          Button('删除配置')
+            .fontSize(12)
+            .margin({ left: 8 })
+            .enabled(this.smbSelectedProfileId.length > 0)
+            .onClick(() => {
+              this.deleteSelectedSmbProfile();
+            });
+        }
+        .width('90%')
+        .margin({ top: 10, bottom: 12 });
+
+        if (this.smbMessage.length > 0) {
+          Text(this.smbMessage)
+            .fontSize(12)
+            .fontColor('#2563EB')
+            .width('90%')
+            .margin({ bottom: 10 });
+        }
+
+        if (this.smbProfiles.length > 0) {
+          List({ space: 8 }) {
+            ForEach(this.smbProfiles, (profile: SmbConnectionProfile) => {
+              ListItem() {
+                Row() {
+                  Text(`${profile.name} · ${profile.host}/${profile.share}`)
+                    .fontSize(12)
+                    .layoutWeight(1)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis });
+
+                  if (this.smbSelectedProfileId === profile.id) {
+                    Text('已选中')
+                      .fontSize(11)
+                      .fontColor('#007DFF');
+                  }
+                }
+                .width('100%')
+                .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+                .borderRadius(8)
+                .backgroundColor(this.smbSelectedProfileId === profile.id ? '#E8F4FF' : '#F8F8F8')
+                .onClick(() => {
+                  this.applySmbProfile(profile);
+                });
+              }
+            }, (profile: SmbConnectionProfile) => profile.id);
+          }
+          .width('90%')
+          .height(88)
+          .margin({ bottom: 10 });
+        }
+
+        List({ space: 8 }) {
+          ForEach(this.smbEntries, (entry: SmbEntry) => {
+            ListItem() {
+              Row() {
+                Text(entry.isDirectory ? `[目录] ${entry.name}` : entry.name)
+                  .fontSize(13)
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis });
+
+                if (!entry.isDirectory) {
+                  Text(entry.size > 0 ? `${Math.round(entry.size / 1024)}KB` : '')
+                    .fontSize(11)
+                    .fontColor('#6B7280');
+                }
+              }
+              .width('100%')
+              .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+              .borderRadius(8)
+              .backgroundColor('#F8F8F8')
+              .onClick(() => {
+                this.openSmbEntry(entry);
+              });
+            }
+          }, (entry: SmbEntry) => `${entry.path}:${entry.name}`);
+        }
+        .width('90%')
+        .height('42%');
+
+        Text(`说明：当前已接入 SMB 配置、保存和 UI 入口；真实 NAS 浏览需在仓库中放入 libsmb2 Native 依赖。`)
           .fontSize(11)
           .fontColor('#6B7280')
           .width('90%')
