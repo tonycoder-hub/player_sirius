@@ -9,6 +9,7 @@
 
 #if PLAYER_SIRIUS_HAS_LIBSMB2
 #include <fcntl.h>
+#include <smb2/smb2.h>
 #include <smb2/libsmb2.h>
 #endif
 

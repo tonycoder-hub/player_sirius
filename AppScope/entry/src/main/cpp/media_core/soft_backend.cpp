@@ -18,6 +18,11 @@ constexpr const char* kBlockerMessage = "FFmpeg backend not linked into current 
 
 class UnavailableSoftDecodeBackend final : public SoftDecodeBackend {
 public:
+    UnavailableSoftDecodeBackend()
+        : pipeline_(CreateDefaultMediaPipeline())
+    {
+    }
+
     Capability GetCapability() const override
     {
         Capability capability;
@@ -87,12 +92,6 @@ public:
         pipeline_->Release();
     }
 
-private:
-    UnavailableSoftDecodeBackend()
-        : pipeline_(CreateDefaultMediaPipeline())
-    {
-    }
-
     static void SetError(std::string* error, const std::string& value)
     {
         if (error != nullptr) {
@@ -103,8 +102,6 @@ private:
     SourceSpec source_;
     int64_t last_position_ms_ = 0;
     std::unique_ptr<MediaPipeline> pipeline_;
-
-    friend std::unique_ptr<SoftDecodeBackend> CreateSoftDecodeBackend();
 };
 
 } // namespace

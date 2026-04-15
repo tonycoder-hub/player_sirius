@@ -22,8 +22,15 @@ test -d third_party/libsmb2
 test -f third_party/libsmb2/upstream/CMakeLists.txt
 
 echo "[4/4] optional cmake configure"
+cmake_bin=""
 if command -v cmake >/dev/null 2>&1; then
-  cmake -S AppScope/entry/src/main/cpp -B /tmp/player_sirius_native_cmake_check >/dev/null
+  cmake_bin="$(command -v cmake)"
+elif [ -x /home/linuxbrew/.linuxbrew/Cellar/cmake/4.3.1/bin/cmake ]; then
+  cmake_bin="/home/linuxbrew/.linuxbrew/Cellar/cmake/4.3.1/bin/cmake"
+fi
+
+if [ -n "$cmake_bin" ]; then
+  "$cmake_bin" -S AppScope/entry/src/main/cpp -B /tmp/player_sirius_native_cmake_check >/dev/null
   echo "cmake configure: ok"
 else
   echo "cmake not found, skip configure"

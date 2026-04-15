@@ -11,6 +11,15 @@ set(PLAYER_SIRIUS_LIBSMB2_SOURCE_DIR "${PLAYER_SIRIUS_LIBSMB2_ROOT}/upstream")
 option(PLAYER_SIRIUS_ENABLE_FFMPEG "Enable FFmpeg backend lookup for Native media core" ON)
 option(PLAYER_SIRIUS_ENABLE_LIBSMB2 "Enable libsmb2 backend lookup for SMB bridge" ON)
 
+find_path(PLAYER_SIRIUS_NODE_API_INCLUDE_DIR
+  NAMES node_api.h
+  PATHS
+    /usr/include/node
+    /usr/local/include/node
+    /opt/homebrew/include/node
+    /home/linuxbrew/.linuxbrew/include/node
+)
+
 add_library(native_player_bridge SHARED
   native_player_bridge.cpp
   media_core/media_pipeline.cpp
@@ -31,6 +40,14 @@ target_include_directories(native_player_bridge PUBLIC
 target_include_directories(smb_client_bridge PUBLIC
   ${NATIVERENDER_ROOT_PATH}
 )
+
+if (PLAYER_SIRIUS_NODE_API_INCLUDE_DIR)
+  target_include_directories(native_player_bridge PRIVATE ${PLAYER_SIRIUS_NODE_API_INCLUDE_DIR})
+  target_include_directories(smb_client_bridge PRIVATE ${PLAYER_SIRIUS_NODE_API_INCLUDE_DIR})
+  message(STATUS "Player Sirius: node_api.h detected under ${PLAYER_SIRIUS_NODE_API_INCLUDE_DIR}")
+else()
+  message(WARNING "Player Sirius: node_api.h not found; NAPI bridge targets may fail to compile")
+endif()
 
 set(PLAYER_SIRIUS_HAS_FFMPEG 0)
 set(PLAYER_SIRIUS_HAS_LIBSMB2 0)
@@ -103,6 +120,7 @@ if (PLAYER_SIRIUS_ENABLE_LIBSMB2)
   if (EXISTS "${PLAYER_SIRIUS_LIBSMB2_SOURCE_DIR}/CMakeLists.txt")
     set(PLAYER_SIRIUS_HAS_LIBSMB2 1)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
     set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(ENABLE_LIBKRB5 OFF CACHE BOOL "" FORCE)
     set(ENABLE_GSSAPI OFF CACHE BOOL "" FORCE)

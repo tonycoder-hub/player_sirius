@@ -12,6 +12,8 @@ player_sirius::NativePlayerCore g_player_core;
 napi_env g_listener_env = nullptr;
 napi_ref g_listener_ref = nullptr;
 
+napi_value CreateMetricsObject(napi_env env, const player_sirius::PlaybackMetrics& metrics);
+
 napi_value MakeString(napi_env env, const std::string& value)
 {
     napi_value result = nullptr;
