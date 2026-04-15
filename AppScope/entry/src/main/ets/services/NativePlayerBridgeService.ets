@@ -2,10 +2,53 @@ export interface NativePlayerCapability {
   available: boolean;
   version: string;
   features: string[];
+  backendName?: string;
+  blocker?: string;
+  stage?: string;
 }
+
+export interface NativePlayerMetrics {
+  bufferedDurationMs: number;
+  decodedAudioFrames: number;
+  decodedVideoFrames: number;
+  renderedAudioFrames: number;
+  renderedVideoFrames: number;
+  droppedVideoFrames: number;
+  emittedEvents: number;
+}
+
+export interface NativePlayerStateSnapshot {
+  state: string;
+  source: string;
+  surfaceId: string;
+  positionMs: number;
+  lastError: string;
+  stage?: string;
+  errorStage?: string;
+  metrics?: NativePlayerMetrics;
+}
+
+export interface NativePlayerEvent {
+  type: string;
+  message: string;
+  state: string;
+  source: string;
+  surfaceId: string;
+  positionMs: number;
+  lastError: string;
+  backendName: string;
+  stage?: string;
+  errorStage?: string;
+  metrics?: NativePlayerMetrics;
+}
+
+export type NativePlayerEventListener = (event: NativePlayerEvent) => void;
 
 interface NativePlayerBridge {
   getCapability?: () => NativePlayerCapability;
+  getState?: () => NativePlayerStateSnapshot;
+  setEventListener?: (listener: NativePlayerEventListener) => void;
+  clearEventListener?: () => void;
   prepare?: (source: string, surfaceId?: string) => number;
   play?: () => void;
   pause?: () => void;
@@ -25,12 +68,44 @@ export class NativePlayerBridgeService {
     return this.bridge?.getCapability?.() ?? {
       available: false,
       version: 'stub',
-      features: ['bridge-skeleton']
+      features: ['bridge-skeleton'],
+      backendName: 'unloaded',
+      blocker: 'Native bridge module is unavailable',
+      stage: 'unloaded'
     };
   }
 
   isAvailable(): boolean {
     return this.getCapability().available;
+  }
+
+  getState(): NativePlayerStateSnapshot {
+    return this.bridge?.getState?.() ?? {
+      state: 'unloaded',
+      source: '',
+      surfaceId: '',
+      positionMs: 0,
+      lastError: '',
+      stage: 'unloaded',
+      errorStage: '',
+      metrics: {
+        bufferedDurationMs: 0,
+        decodedAudioFrames: 0,
+        decodedVideoFrames: 0,
+        renderedAudioFrames: 0,
+        renderedVideoFrames: 0,
+        droppedVideoFrames: 0,
+        emittedEvents: 0
+      }
+    };
+  }
+
+  setEventListener(listener: NativePlayerEventListener): void {
+    this.bridge?.setEventListener?.(listener);
+  }
+
+  clearEventListener(): void {
+    this.bridge?.clearEventListener?.();
   }
 
   prepare(source: string, surfaceId: string = ''): boolean {
@@ -72,4 +147,3 @@ export class NativePlayerBridgeService {
     return null;
   }
 }
-

@@ -47,13 +47,24 @@
 - SSDP 可以发现局域网 DLNA 设备
 - 可以选择设备并投送当前 `http/https` 媒体
 - `Play/Pause/Stop` 控制可下发
+- `GetTransportInfo/GetPositionInfo` 可刷新远端状态
+- DLNA 远端支持 `-10s/+10s` 和音量增减控制
 
 ## 媒体库
 
 - 批量导入视频后可出现在媒体库
+- 使用文件夹扫描导入后，会记住扫描目录
+- 对已记住目录执行重扫后，可新增新文件并移除失效条目
+- 清理失效条目后，不会误删网络流和手动导入项
 - 支持文件夹筛选
 - 本地视频会生成首帧缩略图缓存
 - 媒体信息面板可显示基础元数据
+
+## Native 桥接
+
+- Native 桥接摘要可显示 `backend / state / stage / metrics`
+- Native 失败时可显示 `errorStage`
+- `FFmpeg` 未接入时，Native 能返回明确 blocker 而不是假成功
 
 ## 亮度与手势
 
@@ -61,4 +72,3 @@
 - 右侧竖滑调音量
 - 横向滑动调进度
 - 页面退出后窗口亮度恢复跟随系统
-

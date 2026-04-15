@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+echo "[1/4] git diff --check"
+git diff --check
+
+echo "[2/4] docs snapshot"
+test -f docs/implementation-status.md
+test -f docs/regression-checklist.md
+test -f docs/ffmpeg-integration.md
+
+echo "[3/4] native source snapshot"
+test -f AppScope/entry/src/main/cpp/CMakeLists.txt
+test -f AppScope/entry/src/main/cpp/native_player_bridge.cpp
+test -d AppScope/entry/src/main/cpp/media_core
+
+echo "[4/4] optional cmake configure"
+if command -v cmake >/dev/null 2>&1; then
+  cmake -S AppScope/entry/src/main/cpp -B /tmp/player_sirius_native_cmake_check >/dev/null
+  echo "cmake configure: ok"
+else
+  echo "cmake not found, skip configure"
+fi
+
+echo "pre-push checks: ok"

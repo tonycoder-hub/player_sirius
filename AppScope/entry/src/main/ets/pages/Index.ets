@@ -18,12 +18,14 @@ import { WebDavService } from '../services/WebDavService';
 import { WebDavDownloadService } from '../services/WebDavDownloadService';
 import type { FtpEntry } from '../services/FtpService';
 import { FtpService } from '../services/FtpService';
-import type { DlnaDevice } from '../services/DlnaService';
+import type { DlnaDevice, DlnaPlaybackStatus } from '../services/DlnaService';
 import { DlnaService } from '../services/DlnaService';
 import { BrightnessService } from '../services/BrightnessService';
 import { ThumbnailService } from '../services/ThumbnailService';
 import { LocalScanService } from '../services/LocalScanService';
 import { LocalMediaHttpServerService } from '../services/LocalMediaHttpServerService';
+import type { NativePlayerMetrics } from '../services/NativePlayerBridgeService';
+import type { NativePlayerEvent } from '../services/NativePlayerBridgeService';
 
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
@@ -105,6 +107,10 @@ struct Index {
   @State dlnaMessage: string = '';
   @State dlnaLoading: boolean = false;
   @State selectedDlnaDeviceUsn: string = '';
+  @State dlnaTransportState: string = '未知';
+  @State dlnaCurrentPositionSeconds: number = 0;
+  @State dlnaTrackDurationSeconds: number = 0;
+  @State dlnaRemoteVolume: number = 0;
   @State bufferPercent: number = 0;
   @State cachedDurationSeconds: number = 0;
   @State isBuffering: boolean = false;
@@ -133,11 +139,13 @@ struct Index {
   private playbackStartAtMs: number = 0;
   private lastPlaybackProgressAtMs: number = 0;
   private stallMonitorTimer: number = -1;
+  private dlnaPollTimer: number = -1;
   private attemptedKernelModes: string[] = [];
   private fallbackInProgress: boolean = false;
 
   aboutToAppear(): void {
     this.bindAVPlayerListeners();
+    this.bindNativePlayerListeners();
     this.syncPlayerState();
     this.loadCollections();
     this.startStallMonitor();
@@ -149,8 +157,10 @@ struct Index {
     this.avPlayerService.release();
     this.backgroundPlaybackService.ensureStopped();
     this.nativePlayerBridgeService.release();
+    this.nativePlayerBridgeService.clearEventListener();
     this.localMediaHttpServerService.stop();
     this.stopStallMonitor();
+    this.stopDlnaPolling();
     this.restoreSystemBrightness();
     this.setPreferredOrientation(window.Orientation.PORTRAIT);
   }
@@ -162,8 +172,56 @@ struct Index {
     this.avPlayerService.setSpeed(this.currentSpeed);
     this.avPlayerService.setVolume(this.playerVolume);
     this.updatePlaylist();
+    this.refreshNativeBridgeSummary();
+  }
+
+  private refreshNativeBridgeSummary(): void {
     const capability = this.nativePlayerBridgeService.getCapability();
-    this.nativeBridgeSummary = `${capability.available ? '已加载' : '未加载'} · ${capability.version}`;
+    const state = this.nativePlayerBridgeService.getState();
+    const backendName = capability.backendName && capability.backendName.length > 0 ? capability.backendName : 'unknown-backend';
+    const stage = state.stage && state.stage.length > 0 ? state.stage : (capability.stage ?? 'unknown-stage');
+    const metricsSummary = this.getNativeMetricsSummary(state.metrics);
+    const base = `${capability.available ? '已加载' : '未加载'} · ${capability.version} · ${backendName} · ${state.state} · ${stage} · ${metricsSummary}`;
+    if (state.lastError.length > 0) {
+      const errorStage = state.errorStage && state.errorStage.length > 0 ? state.errorStage : stage;
+      this.nativeBridgeSummary = `${base} · ${errorStage} · ${state.lastError}`;
+      return;
+    }
+    if (!capability.available && capability.blocker && capability.blocker.length > 0) {
+      this.nativeBridgeSummary = `${base} · ${capability.blocker}`;
+      return;
+    }
+    this.nativeBridgeSummary = base;
+  }
+
+  private getNativeMetricsSummary(metrics?: NativePlayerMetrics): string {
+    if (!metrics) {
+      return 'buf 0ms · dv 0 · rv 0';
+    }
+    return `buf ${metrics.bufferedDurationMs}ms · dv ${metrics.decodedVideoFrames} · rv ${metrics.renderedVideoFrames}`;
+  }
+
+  private bindNativePlayerListeners(): void {
+    this.nativePlayerBridgeService.setEventListener((event: NativePlayerEvent) => {
+      this.handleNativePlayerEvent(event);
+    });
+  }
+
+  private handleNativePlayerEvent(event: NativePlayerEvent): void {
+    this.refreshNativeBridgeSummary();
+    if (event.type === 'error' && event.lastError.length > 0) {
+      const errorStage = event.errorStage && event.errorStage.length > 0 ? event.errorStage : (event.stage ?? 'unknown-stage');
+      this.gestureHint = `Native: ${errorStage} · ${event.lastError}`;
+      if (this.isUsingNativePlayer()) {
+        this.errorMessage = event.lastError;
+      }
+      return;
+    }
+
+    if (event.type === 'prepared' || event.type === 'playing' || event.type === 'paused' || event.type === 'stopped' || event.type === 'metrics') {
+      const stage = event.stage && event.stage.length > 0 ? event.stage : 'unknown-stage';
+      this.gestureHint = `Native 状态：${event.state} · ${stage} · ${this.getNativeMetricsSummary(event.metrics)}`;
+    }
   }
 
   private async loadCollections(): Promise<void> {
@@ -313,6 +371,7 @@ struct Index {
     if (this.isUsingNativePlayer()) {
       this.isLoading = true;
       const prepared = this.nativePlayerBridgeService.prepare(this.currentMediaItem.uri, this.avPlayerSurfaceId);
+      this.refreshNativeBridgeSummary();
       if (!prepared) {
         await this.handlePlaybackFailureWithRecovery('Native 内核当前不可用，正在回退到其他播放路径');
         return;
@@ -321,6 +380,7 @@ struct Index {
       this.isLoading = false;
       this.isPlaying = true;
       this.nativePlayerBridgeService.play();
+      this.refreshNativeBridgeSummary();
       this.markCurrentPlaySession();
       this.startBackgroundPlaybackIfNeeded();
       return;
@@ -395,6 +455,7 @@ struct Index {
           this.currentMediaItem.isCompleted = false;
         }
         if (this.currentTime > 0) {
+          this.currentTime = Math.min(this.currentTime, durationSeconds);
           this.avPlayerService.seek(this.currentTime);
         }
         this.updateSubtitleRender(this.currentTime);
@@ -747,14 +808,18 @@ struct Index {
       this.dlnaDevices = devices;
       if (devices.length > 0) {
         this.selectedDlnaDeviceUsn = devices[0].usn;
+        await this.refreshDlnaStatus(false);
+        this.startDlnaPolling();
       } else {
         this.selectedDlnaDeviceUsn = '';
+        this.stopDlnaPolling();
       }
       this.dlnaMessage = devices.length > 0 ? `已发现 ${devices.length} 台设备` : '未发现 DLNA 设备';
     } catch (err) {
       console.error(`DLNA discover failed: ${err}`);
       this.dlnaDevices = [];
       this.selectedDlnaDeviceUsn = '';
+      this.stopDlnaPolling();
       this.dlnaMessage = (err as Error)?.message || '设备发现失败';
     } finally {
       this.dlnaLoading = false;
@@ -775,6 +840,8 @@ struct Index {
     this.dlnaMessage = '正在投送媒体...';
     try {
       await DlnaService.cast(device, mediaUrl);
+      await this.refreshDlnaStatus(false);
+      this.startDlnaPolling();
       this.dlnaMessage = `已投送到 ${device.friendlyName}`;
     } catch (err) {
       console.error(`DLNA cast failed: ${err}`);
@@ -790,6 +857,7 @@ struct Index {
     }
     try {
       await DlnaService.play(device);
+      await this.refreshDlnaStatus(false);
       this.dlnaMessage = `已让 ${device.friendlyName} 播放`;
     } catch (err) {
       this.dlnaMessage = (err as Error)?.message || '播放控制失败';
@@ -804,6 +872,7 @@ struct Index {
     }
     try {
       await DlnaService.pause(device);
+      await this.refreshDlnaStatus(false);
       this.dlnaMessage = `已让 ${device.friendlyName} 暂停`;
     } catch (err) {
       this.dlnaMessage = (err as Error)?.message || '暂停控制失败';
@@ -818,9 +887,88 @@ struct Index {
     }
     try {
       await DlnaService.stop(device);
+      await this.refreshDlnaStatus(false);
       this.dlnaMessage = `已让 ${device.friendlyName} 停止`;
     } catch (err) {
       this.dlnaMessage = (err as Error)?.message || '停止控制失败';
+    }
+  }
+
+  private applyDlnaStatus(status: DlnaPlaybackStatus): void {
+    this.dlnaTransportState = status.transportState || 'UNKNOWN';
+    this.dlnaCurrentPositionSeconds = Math.max(0, status.relTimeSeconds);
+    this.dlnaTrackDurationSeconds = Math.max(0, status.trackDurationSeconds);
+    this.dlnaRemoteVolume = Math.max(0, Math.min(100, status.volume));
+  }
+
+  private async refreshDlnaStatus(updateMessage: boolean = true): Promise<void> {
+    const device = this.getSelectedDlnaDevice();
+    if (!device) {
+      this.dlnaTransportState = '未选择设备';
+      this.dlnaCurrentPositionSeconds = 0;
+      this.dlnaTrackDurationSeconds = 0;
+      this.dlnaRemoteVolume = 0;
+      return;
+    }
+    try {
+      const status = await DlnaService.getPlaybackStatus(device);
+      this.applyDlnaStatus(status);
+      if (updateMessage) {
+        this.dlnaMessage = `${device.friendlyName} · ${status.transportState} · ${this.formatTime(status.relTimeSeconds)} / ${this.formatTime(status.trackDurationSeconds)}`;
+      }
+    } catch (err) {
+      if (updateMessage) {
+        this.dlnaMessage = (err as Error)?.message || '刷新 DLNA 状态失败';
+      }
+    }
+  }
+
+  private startDlnaPolling(): void {
+    if (this.dlnaPollTimer >= 0) {
+      return;
+    }
+    this.dlnaPollTimer = setInterval(() => {
+      this.refreshDlnaStatus(false);
+    }, 3000);
+  }
+
+  private stopDlnaPolling(): void {
+    if (this.dlnaPollTimer < 0) {
+      return;
+    }
+    clearInterval(this.dlnaPollTimer);
+    this.dlnaPollTimer = -1;
+  }
+
+  private async adjustDlnaVolume(delta: number): Promise<void> {
+    const device = this.getSelectedDlnaDevice();
+    if (!device) {
+      this.dlnaMessage = '请先选择设备';
+      return;
+    }
+    try {
+      const next = Math.max(0, Math.min(100, this.dlnaRemoteVolume + delta));
+      await DlnaService.setVolume(device, next);
+      await this.refreshDlnaStatus(false);
+      this.dlnaMessage = `已将 ${device.friendlyName} 音量调整到 ${this.dlnaRemoteVolume}`;
+    } catch (err) {
+      this.dlnaMessage = (err as Error)?.message || 'DLNA 音量控制失败';
+    }
+  }
+
+  private async seekDlnaBy(deltaSeconds: number): Promise<void> {
+    const device = this.getSelectedDlnaDevice();
+    if (!device) {
+      this.dlnaMessage = '请先选择设备';
+      return;
+    }
+    try {
+      const next = Math.max(0, this.dlnaCurrentPositionSeconds + deltaSeconds);
+      await DlnaService.seek(device, next);
+      await this.refreshDlnaStatus(false);
+      this.dlnaMessage = `已跳转到 ${this.formatTime(this.dlnaCurrentPositionSeconds)}`;
+    } catch (err) {
+      this.dlnaMessage = (err as Error)?.message || 'DLNA 进度控制失败';
     }
   }
 
@@ -1195,6 +1343,7 @@ struct Index {
   private stopCurrentPlaybackForSwitch(): void {
     if (this.isUsingNativePlayer()) {
       this.nativePlayerBridgeService.stop();
+      this.refreshNativeBridgeSummary();
     } else if (this.isUsingAVPlayer()) {
       this.avPlayerService.stop();
     } else if (this.currentMediaItem && this.isPrepared) {
@@ -1215,6 +1364,7 @@ struct Index {
     this.isBuffering = false;
     this.backgroundPlaybackService.ensureStopped();
     this.nativePlayerBridgeService.stop();
+    this.refreshNativeBridgeSummary();
   }
 
   private getSelectVideoErrorMessage(error: BusinessError): string {
@@ -1357,6 +1507,9 @@ struct Index {
       if (scanResult.uris.length > 0) {
         uris = scanResult.uris;
         this.libraryMessage = scanResult.message;
+        if (scanResult.rootUri && scanResult.rootUri.length > 0) {
+          await this.storageService.saveLibraryImportRoot(scanResult.rootUri);
+        }
       } else {
         const photoPicker = new picker.PhotoViewPicker();
         const result = await photoPicker.select({
@@ -1373,7 +1526,11 @@ struct Index {
         return;
       }
 
-      const items = uris.map((uri: string) => this.createPlayableItem(uri, this.getFileNameFromUri(uri)));
+      const items = uris.map((uri: string) => {
+        const item = this.createPlayableItem(uri, this.getFileNameFromUri(uri));
+        item.importRootUri = scanResult.rootUri ?? '';
+        return item;
+      });
       await this.storageService.saveMediaLibraryItems(items);
       if (this.libraryMessage.length === 0) {
         this.libraryMessage = `已导入 ${items.length} 个本地媒体，可在媒体库和文件夹视图中浏览。`;
@@ -1387,6 +1544,47 @@ struct Index {
       console.error(`Import media library failed: ${error.code}, ${error.message}`);
       this.libraryMessage = this.getSelectVideoErrorMessage(error) || '导入本地媒体失败，请稍后重试。';
     }
+  }
+
+  private async rescanTrackedLibraryRoots(): Promise<void> {
+    try {
+      const roots = await this.storageService.getLibraryImportRoots();
+      if (roots.length === 0) {
+        this.libraryMessage = '当前没有已记住的扫描目录，请先使用“扫描媒体库”导入文件夹。';
+        return;
+      }
+      this.libraryMessage = '正在重新扫描已记住的媒体目录...';
+      const allUris: string[] = [];
+      const allItems: MediaItem[] = [];
+      let discoveredCount = 0;
+      for (const rootUri of roots) {
+        const scanResult = await LocalScanService.rescanFolder(rootUri, MAX_LIBRARY_IMPORT_COUNT);
+        discoveredCount += scanResult.uris.length;
+        for (const uri of scanResult.uris) {
+          allUris.push(uri);
+          const item = this.createPlayableItem(uri, this.getFileNameFromUri(uri));
+          item.importRootUri = rootUri;
+          allItems.push(item);
+        }
+      }
+      await this.storageService.saveMediaLibraryItems(allItems);
+      const removedTracked = await this.storageService.pruneLibraryItemsByTrackedRoots(roots, Array.from(new Set(allUris)));
+      await this.loadCollections();
+      await this.ensureLibraryThumbnails();
+      this.activeLibraryTab = 'library';
+      this.showLibrary = true;
+      this.libraryMessage = `已重新扫描 ${roots.length} 个目录，发现 ${discoveredCount} 个媒体文件，移除 ${removedTracked} 个失效条目。`;
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`Rescan media library failed: ${error.code}, ${error.message}`);
+      this.libraryMessage = '重新扫描媒体库失败，请稍后重试。';
+    }
+  }
+
+  private async cleanupMissingLibraryItems(): Promise<void> {
+    const removedCount = await this.storageService.cleanupMissingLocalMedia();
+    await this.loadCollections();
+    this.libraryMessage = removedCount > 0 ? `已清理 ${removedCount} 个失效本地条目。` : '未发现失效的本地媒体条目。';
   }
 
   private async openNetworkMedia(): Promise<void> {
@@ -1499,6 +1697,7 @@ struct Index {
         this.avPlayerService.pause();
       } else if (this.isUsingNativePlayer()) {
         this.nativePlayerBridgeService.pause();
+        this.refreshNativeBridgeSummary();
       } else {
         this.videoController.pause();
       }
@@ -1511,6 +1710,7 @@ struct Index {
       this.avPlayerService.play();
     } else if (this.isUsingNativePlayer()) {
       this.nativePlayerBridgeService.play();
+      this.refreshNativeBridgeSummary();
     } else {
       this.videoController.start();
     }
@@ -1524,6 +1724,7 @@ struct Index {
 
     if (this.isUsingNativePlayer()) {
       this.nativePlayerBridgeService.stop();
+      this.refreshNativeBridgeSummary();
     } else if (this.isUsingAVPlayer()) {
       this.avPlayerService.stop();
     } else {
@@ -1552,6 +1753,7 @@ struct Index {
     if (this.isUsingNativePlayer()) {
       this.nativePlayerBridgeService.seek(0);
       this.nativePlayerBridgeService.play();
+      this.refreshNativeBridgeSummary();
     } else if (this.isUsingAVPlayer()) {
       this.avPlayerService.seek(0);
       this.avPlayerService.play();
@@ -1867,6 +2069,13 @@ struct Index {
               this.importMediaLibrary();
             });
 
+          Button('重扫目录')
+            .fontSize(14)
+            .margin({ left: 10 })
+            .onClick(() => {
+              this.rescanTrackedLibraryRoots();
+            });
+
           Button('媒体库')
             .fontSize(14)
             .margin({ left: 10 })
@@ -2055,6 +2264,8 @@ struct Index {
               .margin({ left: 8 })
               .onClick(() => {
                 this.showCastingPanel = true;
+                this.refreshDlnaStatus(false);
+                this.startDlnaPolling();
               });
           }
           .width('100%');
@@ -2436,6 +2647,7 @@ struct Index {
       dragBar: true,
       onDisappear: () => {
         this.showCastingPanel = false;
+        this.stopDlnaPolling();
       }
     });
   }
@@ -2631,6 +2843,24 @@ struct Index {
           });
       }
       .width('92%')
+      .margin({ bottom: 12 });
+
+      Row() {
+        Button('重扫已记住目录')
+          .fontSize(12)
+          .onClick(() => {
+            this.rescanTrackedLibraryRoots();
+          });
+
+        Button('清理失效条目')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .onClick(() => {
+            this.cleanupMissingLibraryItems();
+          });
+      }
+      .width('92%')
+      .justifyContent(FlexAlign.Start)
       .margin({ bottom: 12 });
 
       if (this.activeLibraryTab === 'folders') {
@@ -3212,9 +3442,54 @@ struct Index {
           .onClick(() => {
             this.stopOnSelectedDevice();
           });
+        Button('刷新状态')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.refreshDlnaStatus();
+          });
       }
       .width('90%')
       .margin({ bottom: 12 });
+
+      Row() {
+        Button('-10s')
+          .fontSize(12)
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.seekDlnaBy(-10);
+          });
+        Button('+10s')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.seekDlnaBy(10);
+          });
+        Button('音量-')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.adjustDlnaVolume(-5);
+          });
+        Button('音量+')
+          .fontSize(12)
+          .margin({ left: 8 })
+          .enabled(this.selectedDlnaDeviceUsn.length > 0)
+          .onClick(() => {
+            this.adjustDlnaVolume(5);
+          });
+      }
+      .width('90%')
+      .margin({ bottom: 12 });
+
+      Text(`远端状态：${this.dlnaTransportState} · ${this.formatTime(this.dlnaCurrentPositionSeconds)} / ${this.formatTime(this.dlnaTrackDurationSeconds)} · 音量 ${this.dlnaRemoteVolume}`)
+        .fontSize(12)
+        .fontColor('#374151')
+        .width('90%')
+        .margin({ bottom: 10 });
 
       if (this.dlnaMessage.length > 0) {
         Text(this.dlnaMessage)
@@ -3246,6 +3521,8 @@ struct Index {
             .backgroundColor(this.selectedDlnaDeviceUsn === device.usn ? '#E8F4FF' : '#F8F8F8')
             .onClick(() => {
               this.selectedDlnaDeviceUsn = device.usn;
+              this.refreshDlnaStatus(false);
+              this.startDlnaPolling();
             });
           }
         }, (device: DlnaDevice) => device.usn);

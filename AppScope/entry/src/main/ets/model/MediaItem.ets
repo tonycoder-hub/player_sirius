@@ -15,6 +15,7 @@ export interface MediaItem {
   width?: number;
   height?: number;
   fileSizeBytes?: number;
+  importRootUri?: string;
 }
 
 export class MediaItemHelper {

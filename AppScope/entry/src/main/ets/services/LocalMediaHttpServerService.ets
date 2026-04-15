@@ -85,12 +85,23 @@ export class LocalMediaHttpServerService {
 
   private async handleClient(client: socket.TCPSocketConnection): Promise<void> {
     const decoder = util.TextDecoder.create('utf-8', { ignoreBOM: true });
+    let requestBuffer = '';
     const onMessage = async (info: socket.SocketMessageInfo) => {
       try {
-        const request = decoder.decodeToString(new Uint8Array(info.message), { stream: false });
-        await this.handleHttpRequest(client, request);
+        requestBuffer += decoder.decodeToString(new Uint8Array(info.message), { stream: true });
+        if (requestBuffer.length > 16 * 1024) {
+          await this.sendTextResponse(client, 431, 'Request Header Fields Too Large', 'headers too large');
+          return;
+        }
+        if (!requestBuffer.includes('\r\n\r\n') && !requestBuffer.includes('\n\n')) {
+          return;
+        }
+        requestBuffer += decoder.decodeToString(new Uint8Array(), { stream: false });
+        await this.handleHttpRequest(client, requestBuffer);
       } finally {
-        client.off('message');
+        if (requestBuffer.includes('\r\n\r\n') || requestBuffer.includes('\n\n') || requestBuffer.length > 16 * 1024) {
+          client.off('message');
+        }
       }
     };
 
@@ -267,4 +278,3 @@ export class LocalMediaHttpServerService {
     return 'application/octet-stream';
   }
 }
-

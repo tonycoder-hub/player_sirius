@@ -7,6 +7,15 @@ export interface DlnaDevice {
   friendlyName: string;
   deviceType: string;
   avTransportControlUrl: string;
+  renderingControlUrl: string;
+}
+
+export interface DlnaPlaybackStatus {
+  transportState: string;
+  currentUri: string;
+  relTimeSeconds: number;
+  trackDurationSeconds: number;
+  volume: number;
 }
 
 interface SsdpResponse {
@@ -139,7 +148,92 @@ export class DlnaService {
     );
   }
 
-  private static async soap(controlUrl: string, soapAction: string, body: string): Promise<void> {
+  static async seek(device: DlnaDevice, positionSeconds: number): Promise<void> {
+    await DlnaService.soap(device.avTransportControlUrl,
+      'urn:schemas-upnp-org:service:AVTransport:1#Seek',
+      `<?xml version="1.0" encoding="utf-8"?>` +
+      `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
+      `<s:Body>` +
+      `<u:Seek xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">` +
+      `<InstanceID>0</InstanceID>` +
+      `<Unit>REL_TIME</Unit>` +
+      `<Target>${DlnaService.formatTime(positionSeconds)}</Target>` +
+      `</u:Seek>` +
+      `</s:Body>` +
+      `</s:Envelope>`
+    );
+  }
+
+  static async setVolume(device: DlnaDevice, volume: number): Promise<void> {
+    if (device.renderingControlUrl.length === 0) {
+      throw new Error('当前设备不支持 DLNA 音量控制');
+    }
+    const normalized = Math.max(0, Math.min(100, Math.round(volume)));
+    await DlnaService.soap(device.renderingControlUrl,
+      'urn:schemas-upnp-org:service:RenderingControl:1#SetVolume',
+      `<?xml version="1.0" encoding="utf-8"?>` +
+      `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
+      `<s:Body>` +
+      `<u:SetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">` +
+      `<InstanceID>0</InstanceID>` +
+      `<Channel>Master</Channel>` +
+      `<DesiredVolume>${normalized}</DesiredVolume>` +
+      `</u:SetVolume>` +
+      `</s:Body>` +
+      `</s:Envelope>`
+    );
+  }
+
+  static async getPlaybackStatus(device: DlnaDevice): Promise<DlnaPlaybackStatus> {
+    const [transportXml, positionXml, volumeXml] = await Promise.all([
+      DlnaService.soap(device.avTransportControlUrl,
+        'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo',
+        `<?xml version="1.0" encoding="utf-8"?>` +
+        `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
+        `<s:Body>` +
+        `<u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">` +
+        `<InstanceID>0</InstanceID>` +
+        `</u:GetTransportInfo>` +
+        `</s:Body>` +
+        `</s:Envelope>`
+      ),
+      DlnaService.soap(device.avTransportControlUrl,
+        'urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo',
+        `<?xml version="1.0" encoding="utf-8"?>` +
+        `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
+        `<s:Body>` +
+        `<u:GetPositionInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">` +
+        `<InstanceID>0</InstanceID>` +
+        `</u:GetPositionInfo>` +
+        `</s:Body>` +
+        `</s:Envelope>`
+      ),
+      device.renderingControlUrl.length > 0
+        ? DlnaService.soap(device.renderingControlUrl,
+          'urn:schemas-upnp-org:service:RenderingControl:1#GetVolume',
+          `<?xml version="1.0" encoding="utf-8"?>` +
+          `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
+          `<s:Body>` +
+          `<u:GetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">` +
+          `<InstanceID>0</InstanceID>` +
+          `<Channel>Master</Channel>` +
+          `</u:GetVolume>` +
+          `</s:Body>` +
+          `</s:Envelope>`
+        )
+        : Promise.resolve('')
+    ]);
+
+    return {
+      transportState: DlnaService.extractTag(transportXml, 'CurrentTransportState') || 'UNKNOWN',
+      currentUri: DlnaService.extractTag(positionXml, 'TrackURI'),
+      relTimeSeconds: DlnaService.parseTimeToSeconds(DlnaService.extractTag(positionXml, 'RelTime')),
+      trackDurationSeconds: DlnaService.parseTimeToSeconds(DlnaService.extractTag(positionXml, 'TrackDuration')),
+      volume: Number(DlnaService.extractTag(volumeXml, 'CurrentVolume') || '0')
+    };
+  }
+
+  private static async soap(controlUrl: string, soapAction: string, body: string): Promise<string> {
     const res = await fetch(controlUrl, {
       method: 'POST',
       headers: {
@@ -153,6 +247,7 @@ export class DlnaService {
       const text = await res.text().catch(() => '');
       throw new Error(`DLNA 控制失败：HTTP ${res.status}${text.length > 0 ? ` ${text}` : ''}`);
     }
+    return await res.text().catch(() => '');
   }
 
   private static parseSsdpResponse(message: string): SsdpResponse | null {
@@ -190,12 +285,15 @@ export class DlnaService {
     const friendlyName = DlnaService.extractTag(xml, 'friendlyName') || response.st || '未知设备';
     const serviceBlocks = xml.match(/<service>[\s\S]*?<\/service>/g) ?? [];
     let avTransportControlUrl = '';
+    let renderingControlUrl = '';
     for (const block of serviceBlocks) {
       const serviceType = DlnaService.extractTag(block, 'serviceType');
       if (serviceType.includes('AVTransport')) {
         const controlUrl = DlnaService.extractTag(block, 'controlURL');
         avTransportControlUrl = DlnaService.resolveUrl(response.location, controlUrl);
-        break;
+      } else if (serviceType.includes('RenderingControl')) {
+        const controlUrl = DlnaService.extractTag(block, 'controlURL');
+        renderingControlUrl = DlnaService.resolveUrl(response.location, controlUrl);
       }
     }
     if (avTransportControlUrl.length === 0) {
@@ -206,7 +304,8 @@ export class DlnaService {
       location: response.location,
       friendlyName,
       deviceType,
-      avTransportControlUrl
+      avTransportControlUrl,
+      renderingControlUrl
     };
   }
 
@@ -232,5 +331,20 @@ export class DlnaService {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&apos;');
   }
-}
 
+  private static parseTimeToSeconds(value: string): number {
+    const match = value.trim().match(/^(\d+):(\d+):(\d+)$/);
+    if (!match) {
+      return 0;
+    }
+    return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+  }
+
+  private static formatTime(seconds: number): string {
+    const total = Math.max(0, Math.floor(seconds));
+    const hours = Math.floor(total / 3600).toString().padStart(2, '0');
+    const minutes = Math.floor((total % 3600) / 60).toString().padStart(2, '0');
+    const secs = (total % 60).toString().padStart(2, '0');
+    return `${hours}:${minutes}:${secs}`;
+  }
+}

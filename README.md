@@ -149,8 +149,9 @@
 
 - **Native 播放内核本体**
   - 当前已经有 ArkTS 桥接服务和 `cpp/NAPI` 骨架，且能进入主播放控制链。
-  - 但底层 `native_player_bridge.cpp` 仍然是 `stub`，还没有真正的 `demux / decoder / render / A/V sync` 管线。
-  - 现阶段更准确的状态是“桥接路径已打通”，不是“Native 播放器已完成”。
+  - 当前已补齐 `media_core` 分层、`demuxer / decoder / renderer / audio-output / clock` 五段式 pipeline 骨架、NAPI 状态查询、事件回调、基础 metrics 透传和 `FFmpeg` 接入骨架。
+  - 但仓库内仍未放入可用的 `FFmpeg/libav*` 产物，也还没有真正的 `demux / decoder / render / A/V sync` 管线。
+  - 现阶段更准确的状态是“Native 工程骨架与依赖接入口已打通”，不是“Native 播放器已完成”。
 
 - **SMB / CIFS**
   - 当前工程没有纯 `SMB/CIFS` 客户端实现，也没有浏览、鉴权、播放入口。

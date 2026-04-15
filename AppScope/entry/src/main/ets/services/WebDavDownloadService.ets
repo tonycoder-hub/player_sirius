@@ -95,12 +95,13 @@ export class WebDavDownloadService {
 
   private static base64Encode(value: string): string {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    const bytes = WebDavDownloadService.utf8Encode(value);
     let output = '';
     let i = 0;
-    while (i < value.length) {
-      const c1 = value.charCodeAt(i++);
-      const c2 = value.charCodeAt(i++);
-      const c3 = value.charCodeAt(i++);
+    while (i < bytes.length) {
+      const c1 = bytes[i++];
+      const c2 = i < bytes.length ? bytes[i++] : Number.NaN;
+      const c3 = i < bytes.length ? bytes[i++] : Number.NaN;
 
       const e1 = c1 >> 2;
       const e2 = ((c1 & 3) << 4) | (c2 >> 4);
@@ -118,5 +119,27 @@ export class WebDavDownloadService {
     }
     return output;
   }
-}
 
+  private static utf8Encode(value: string): number[] {
+    const bytes: number[] = [];
+    for (const char of value) {
+      const codePoint = char.codePointAt(0) ?? 0;
+      if (codePoint <= 0x7F) {
+        bytes.push(codePoint);
+      } else if (codePoint <= 0x7FF) {
+        bytes.push(0xC0 | (codePoint >> 6));
+        bytes.push(0x80 | (codePoint & 0x3F));
+      } else if (codePoint <= 0xFFFF) {
+        bytes.push(0xE0 | (codePoint >> 12));
+        bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
+        bytes.push(0x80 | (codePoint & 0x3F));
+      } else {
+        bytes.push(0xF0 | (codePoint >> 18));
+        bytes.push(0x80 | ((codePoint >> 12) & 0x3F));
+        bytes.push(0x80 | ((codePoint >> 6) & 0x3F));
+        bytes.push(0x80 | (codePoint & 0x3F));
+      }
+    }
+    return bytes;
+  }
+}

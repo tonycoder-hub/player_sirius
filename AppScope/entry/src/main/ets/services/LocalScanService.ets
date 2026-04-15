@@ -5,6 +5,7 @@ import type { common } from '@kit.AbilityKit';
 export interface ScanResult {
   uris: string[];
   message: string;
+  rootUri?: string;
 }
 
 export class LocalScanService {
@@ -37,10 +38,24 @@ export class LocalScanService {
       }
 
       const uris = await LocalScanService.listFilesByExtensions(folderUri, ['.mp4', '.mkv', '.avi', '.mov', '.m3u8', '.flv'], maxCount);
-      return { uris, message: `已扫描到 ${uris.length} 个媒体文件` };
+      return { uris, message: `已扫描到 ${uris.length} 个媒体文件`, rootUri: folderUri };
     } catch (err) {
       const error = err as BusinessError;
       return { uris: [], message: `扫描失败：${error.message ?? `${err}`}` };
+    }
+  }
+
+  static async rescanFolder(folderUri: string, maxCount: number = 200): Promise<ScanResult> {
+    try {
+      const uris = await LocalScanService.listFilesByExtensions(folderUri, ['.mp4', '.mkv', '.avi', '.mov', '.m3u8', '.flv'], maxCount);
+      return {
+        uris,
+        message: uris.length > 0 ? `重新扫描到 ${uris.length} 个媒体文件` : '扫描源中未发现可导入视频',
+        rootUri: folderUri
+      };
+    } catch (err) {
+      const error = err as BusinessError;
+      return { uris: [], message: `重新扫描失败：${error.message ?? `${err}`}`, rootUri: folderUri };
     }
   }
 

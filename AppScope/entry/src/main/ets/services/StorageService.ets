@@ -1,10 +1,12 @@
 import { preferences } from '@kit.ArkData';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import type { MediaItem } from '../model/MediaItem';
 
 const PREFERENCES_NAME = 'player_sirius_prefs';
 const KEY_HISTORY = 'play_history';
 const KEY_LIBRARY = 'media_library';
+const KEY_LIBRARY_ROOTS = 'media_library_roots';
 const MAX_HISTORY_SIZE = 50;
 const MAX_LIBRARY_SIZE = 200;
 
@@ -51,7 +53,8 @@ export class StorageService {
       thumbnailUri: item.thumbnailUri ?? '',
       width: item.width ?? 0,
       height: item.height ?? 0,
-      fileSizeBytes: item.fileSizeBytes ?? 0
+      fileSizeBytes: item.fileSizeBytes ?? 0,
+      importRootUri: item.importRootUri ?? ''
     };
   }
 
@@ -66,7 +69,8 @@ export class StorageService {
       isFavorite: incoming.isFavorite ?? current.isFavorite,
       lastPlayedAt: Math.max(current.lastPlayedAt ?? 0, incoming.lastPlayedAt ?? 0),
       playCount: Math.max(current.playCount ?? 0, incoming.playCount ?? 0),
-      isCompleted: incoming.isCompleted ?? current.isCompleted
+      isCompleted: incoming.isCompleted ?? current.isCompleted,
+      importRootUri: incoming.importRootUri || current.importRootUri
     });
   }
 
@@ -86,6 +90,23 @@ export class StorageService {
   private async writeItems(key: string, items: MediaItem[]): Promise<void> {
     const prefs = await this.getPreferences();
     await prefs.put(key, JSON.stringify(items));
+    await prefs.flush();
+  }
+
+  private async readStringArray(key: string): Promise<string[]> {
+    const prefs = await this.getPreferences();
+    try {
+      const rawValue = await prefs.get(key, '[]');
+      const parsed = JSON.parse(rawValue as string) as string[];
+      return parsed.filter((item: string) => item.length > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  private async writeStringArray(key: string, values: string[]): Promise<void> {
+    const prefs = await this.getPreferences();
+    await prefs.put(key, JSON.stringify(values));
     await prefs.flush();
   }
 
@@ -138,6 +159,89 @@ export class StorageService {
       const message = err instanceof Error ? err.message : JSON.stringify(err);
       console.error(`Get media library failed: ${message}`);
       return [];
+    }
+  }
+
+  async saveLibraryImportRoot(rootUri: string): Promise<void> {
+    if (rootUri.trim().length === 0) {
+      return;
+    }
+    const roots = await this.getLibraryImportRoots();
+    if (roots.includes(rootUri)) {
+      return;
+    }
+    roots.push(rootUri);
+    await this.writeStringArray(KEY_LIBRARY_ROOTS, roots);
+  }
+
+  async getLibraryImportRoots(): Promise<string[]> {
+    try {
+      return await this.readStringArray(KEY_LIBRARY_ROOTS);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Get library roots failed: ${message}`);
+      return [];
+    }
+  }
+
+  async pruneLibraryItems(itemsToKeep: MediaItem[]): Promise<void> {
+    try {
+      await this.writeItems(KEY_LIBRARY, itemsToKeep.slice(0, MAX_LIBRARY_SIZE));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Prune media library failed: ${message}`);
+    }
+  }
+
+  async pruneLibraryItemsByTrackedRoots(trackedRoots: string[], knownUris: string[]): Promise<number> {
+    try {
+      const known = new Set<string>(knownUris);
+      const roots = trackedRoots.filter((root: string) => root.length > 0);
+      const library = await this.readItems(KEY_LIBRARY);
+      const filtered = library.filter((item: MediaItem) => {
+        if (item.sourceType !== 'local') {
+          return true;
+        }
+        if (!item.importRootUri || !roots.includes(item.importRootUri)) {
+          return true;
+        }
+        return known.has(item.uri);
+      });
+      const removedCount = library.length - filtered.length;
+      if (removedCount > 0) {
+        await this.writeItems(KEY_LIBRARY, filtered);
+      }
+      return removedCount;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Prune tracked roots failed: ${message}`);
+      return 0;
+    }
+  }
+
+  async cleanupMissingLocalMedia(): Promise<number> {
+    try {
+      const library = await this.readItems(KEY_LIBRARY);
+      const filtered = library.filter((item: MediaItem) => {
+        if (item.sourceType !== 'local') {
+          return true;
+        }
+        try {
+          fs.statSync(item.uri);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      const removedCount = library.length - filtered.length;
+      if (removedCount > 0) {
+        await this.writeItems(KEY_LIBRARY, filtered);
+      }
+      return removedCount;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Cleanup media library failed: ${message}`);
+      return 0;
     }
   }
 
