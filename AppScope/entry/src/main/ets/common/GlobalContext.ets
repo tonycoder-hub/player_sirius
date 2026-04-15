@@ -2,12 +2,14 @@ import { AVPlayerService } from '../services/AVPlayerService';
 import { PlayerService } from '../services/PlayerService';
 import { PlayerKernelService } from '../services/PlayerKernelService';
 import { StorageService } from '../services/StorageService';
+import { BackgroundPlaybackService } from '../services/BackgroundPlaybackService';
 
 export class GlobalContext {
   private static _avPlayerService: AVPlayerService | null = null;
   private static _playerService: PlayerService | null = null;
   private static _playerKernelService: PlayerKernelService | null = null;
   private static _storageService: StorageService | null = null;
+  private static _backgroundPlaybackService: BackgroundPlaybackService | null = null;
 
   static getAVPlayerService(): AVPlayerService {
     if (!this._avPlayerService) {
@@ -35,5 +37,12 @@ export class GlobalContext {
       this._playerKernelService = new PlayerKernelService();
     }
     return this._playerKernelService;
+  }
+
+  static getBackgroundPlaybackService(): BackgroundPlaybackService {
+    if (!this._backgroundPlaybackService) {
+      this._backgroundPlaybackService = new BackgroundPlaybackService();
+    }
+    return this._backgroundPlaybackService;
   }
 }

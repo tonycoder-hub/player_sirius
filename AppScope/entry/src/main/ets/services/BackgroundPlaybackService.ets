@@ -1,0 +1,133 @@
+import { BusinessError } from '@kit.BasicServicesKit';
+import { wantAgent, type common } from '@kit.AbilityKit';
+import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
+import { avSession } from '@kit.AVSessionKit';
+import type { MediaItem } from '../model/MediaItem';
+
+export class BackgroundPlaybackService {
+  private context: common.UIAbilityContext | null = null;
+  private session: any | null = null;
+  private running: boolean = false;
+  private readonly sessionTag: string = 'PLAYER_SIRIUS_SESSION';
+
+  setContext(context: common.UIAbilityContext): void {
+    this.context = context;
+  }
+
+  async ensureStarted(currentItem: MediaItem, durationSeconds: number, positionSeconds: number, isPlaying: boolean): Promise<void> {
+    if (!this.context) {
+      return;
+    }
+
+    await this.ensureSession(currentItem, durationSeconds, positionSeconds, isPlaying);
+    await this.startBackgroundTask();
+  }
+
+  async ensureStopped(): Promise<void> {
+    await this.stopBackgroundTask();
+    await this.destroySession();
+  }
+
+  async updateSessionState(currentItem: MediaItem, durationSeconds: number, positionSeconds: number, isPlaying: boolean): Promise<void> {
+    if (!this.session) {
+      return;
+    }
+
+    try {
+      const metadata = {
+        assetId: currentItem.id,
+        title: currentItem.title,
+        duration: Math.max(0, Math.floor(durationSeconds * 1000)),
+        description: currentItem.sourceType === 'network' ? '网络流' : '本地文件'
+      };
+      await this.session.setAVMetadata(metadata);
+
+      const playbackState = {
+        state: isPlaying ? (avSession as any).PlaybackState?.PLAYBACK_STATE_PLAY : (avSession as any).PlaybackState?.PLAYBACK_STATE_PAUSE,
+        speed: 1.0,
+        position: {
+          elapsedTime: Math.max(0, Math.floor(positionSeconds * 1000)),
+          updateTime: Date.now()
+        }
+      };
+      await this.session.setAVPlaybackState(playbackState);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`Update AVSession failed: ${error.code}, ${error.message}`);
+    }
+  }
+
+  private async ensureSession(currentItem: MediaItem, durationSeconds: number, positionSeconds: number, isPlaying: boolean): Promise<void> {
+    if (!this.context || this.session) {
+      if (this.session) {
+        await this.updateSessionState(currentItem, durationSeconds, positionSeconds, isPlaying);
+      }
+      return;
+    }
+
+    try {
+      // Use 'video' session for a video player (also works for audio tracks in video).
+      this.session = await (avSession as any).createAVSession(this.context, this.sessionTag, 'video');
+      await this.session.activate();
+      await this.updateSessionState(currentItem, durationSeconds, positionSeconds, isPlaying);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`Create/activate AVSession failed: ${error.code}, ${error.message}`);
+      this.session = null;
+    }
+  }
+
+  private async destroySession(): Promise<void> {
+    if (!this.session) {
+      return;
+    }
+    try {
+      await this.session.destroy();
+    } catch {
+      // ignore
+    } finally {
+      this.session = null;
+    }
+  }
+
+  private async startBackgroundTask(): Promise<void> {
+    if (!this.context || this.running) {
+      return;
+    }
+    try {
+      const wantAgentInfo: wantAgent.WantAgentInfo = {
+        wants: [
+          {
+            bundleName: 'com.playersirius.app',
+            abilityName: 'EntryAbility'
+          }
+        ],
+        operationType: wantAgent.OperationType.START_ABILITY,
+        requestCode: 0,
+        wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
+      };
+      const agent = await wantAgent.getWantAgent(wantAgentInfo);
+      const mode = (backgroundTaskManager as any).BackgroundMode?.AUDIO_PLAYBACK ?? 'audioPlayback';
+      await (backgroundTaskManager as any).startBackgroundRunning(this.context, mode, agent);
+      this.running = true;
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`Start background running failed: ${error.code}, ${error.message}`);
+      this.running = false;
+    }
+  }
+
+  private async stopBackgroundTask(): Promise<void> {
+    if (!this.context || !this.running) {
+      return;
+    }
+    try {
+      await (backgroundTaskManager as any).stopBackgroundRunning(this.context);
+    } catch {
+      // ignore
+    } finally {
+      this.running = false;
+    }
+  }
+}
+

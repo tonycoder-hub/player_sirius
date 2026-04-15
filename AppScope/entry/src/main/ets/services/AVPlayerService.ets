@@ -9,6 +9,14 @@ export interface AVPlayerListener {
   onPause?: () => void;
   onCompletion?: () => void;
   onError?: (message: string) => void;
+  onAudioInterrupt?: (event: unknown) => void;
+}
+
+export interface AVPlayerTrackSummary {
+  trackIndex: number;
+  label: string;
+  language: string;
+  codec: string;
 }
 
 export class AVPlayerService {
@@ -130,6 +138,102 @@ export class AVPlayerService {
     await this.applySpeed(this.avPlayer);
   }
 
+  async getAudioTracks(): Promise<AVPlayerTrackSummary[]> {
+    const player = await this.ensurePlayer();
+    const getTracksCapablePlayer = player as media.AVPlayer & {
+      getTrackDescription?: () => Promise<Array<media.MediaDescription>>;
+    };
+    if (!getTracksCapablePlayer.getTrackDescription) {
+      return [];
+    }
+
+    try {
+      const descriptions = await getTracksCapablePlayer.getTrackDescription();
+      const result: AVPlayerTrackSummary[] = [];
+      let audioOrdinal = 0;
+
+      for (const desc of descriptions) {
+        const anyDesc = desc as unknown as Record<string | number, unknown>;
+        const trackType = anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
+          .MD_KEY_TRACK_TYPE as unknown as string] ?? anyDesc['trackType'];
+        const isAudio = trackType === (media as unknown as { TrackType: Record<string, unknown> }).TrackType.AUDIO
+          || trackType === 'audio';
+        if (!isAudio) {
+          continue;
+        }
+
+        const trackIndex = Number(
+          anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
+            .MD_KEY_TRACK_INDEX as unknown as string] ?? anyDesc['trackIndex']
+        );
+        if (!Number.isFinite(trackIndex)) {
+          continue;
+        }
+
+        const language = String(
+          anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
+            .MD_KEY_LANGUAGE as unknown as string] ?? anyDesc['language'] ?? ''
+        );
+        const codec = String(
+          anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
+            .MD_KEY_CODEC_MIME as unknown as string]
+          ?? anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
+            .MD_KEY_CODEC_NAME as unknown as string]
+          ?? anyDesc['codec'] ?? ''
+        );
+
+        audioOrdinal += 1;
+        const label = language.length > 0 ? `音轨 ${audioOrdinal} (${language})` : `音轨 ${audioOrdinal}`;
+        result.push({ trackIndex, label, language, codec });
+      }
+
+      return result;
+    } catch (err) {
+      // Calling getTrackDescription() before prepared may throw; treat as "no tracks yet".
+      return [];
+    }
+  }
+
+  async selectTrack(trackIndex: number): Promise<void> {
+    if (!this.avPlayer) {
+      return;
+    }
+
+    const trackCapablePlayer = this.avPlayer as media.AVPlayer & {
+      selectTrack?: (trackIndex: number) => Promise<void> | void;
+    };
+    if (!trackCapablePlayer.selectTrack) {
+      return;
+    }
+
+    try {
+      await trackCapablePlayer.selectTrack(trackIndex);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`AVPlayer selectTrack failed: ${error.code}, ${error.message}`);
+    }
+  }
+
+  async deselectTrack(trackIndex: number): Promise<void> {
+    if (!this.avPlayer) {
+      return;
+    }
+
+    const trackCapablePlayer = this.avPlayer as media.AVPlayer & {
+      deselectTrack?: (trackIndex: number) => Promise<void> | void;
+    };
+    if (!trackCapablePlayer.deselectTrack) {
+      return;
+    }
+
+    try {
+      await trackCapablePlayer.deselectTrack(trackIndex);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`AVPlayer deselectTrack failed: ${error.code}, ${error.message}`);
+    }
+  }
+
   async release(): Promise<void> {
     if (!this.avPlayer) {
       return;
@@ -207,6 +311,10 @@ export class AVPlayerService {
     player.on('error', (err: BusinessError) => {
       console.error(`AVPlayer error: ${err.code}, ${err.message}`);
       this.listener?.onError?.('AVPlayer 播放失败。');
+    });
+
+    player.on('audioInterrupt', (event: unknown) => {
+      this.listener?.onAudioInterrupt?.(event);
     });
 
     this.callbacksRegistered = true;

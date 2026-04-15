@@ -2,13 +2,18 @@ import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import window from '@ohos.window';
-import type { AVPlayerListener } from '../services/AVPlayerService';
+import audio from '@ohos.multimedia.audio';
+import type { AVPlayerListener, AVPlayerTrackSummary } from '../services/AVPlayerService';
 import { PlayerService, PLAYBACK_SPEEDS } from '../services/PlayerService';
 import { PlayerKernelService } from '../services/PlayerKernelService';
 import { PermissionService } from '../services/PermissionService';
 import { GlobalContext } from '../common/GlobalContext';
 import type { MediaItem } from '../model/MediaItem';
 import { MediaItemHelper } from '../model/MediaItem';
+import type { SubtitleCue } from '../services/SubtitleService';
+import { SubtitleService } from '../services/SubtitleService';
+import type { WebDavEntry } from '../services/WebDavService';
+import { WebDavService } from '../services/WebDavService';
 
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
@@ -40,6 +45,7 @@ struct Index {
   @State showNetworkInput: boolean = false;
   @State showMediaInfo: boolean = false;
   @State showTrackPanel: boolean = false;
+  @State showRemotePanel: boolean = false;
   @State playlistItems: MediaItem[] = [];
   @State historyItems: MediaItem[] = [];
   @State libraryItems: MediaItem[] = [];
@@ -57,8 +63,21 @@ struct Index {
   @State playerVolume: number = 1.0;
   @State subtitleEnabled: boolean = false;
   @State subtitleOffsetSeconds: number = 0;
+  @State subtitleUri: string = '';
+  @State subtitleCues: SubtitleCue[] = [];
+  @State subtitleText: string = '';
+  @State subtitleMessage: string = '';
+  @State audioTracks: AVPlayerTrackSummary[] = [];
+  @State selectedAudioTrackIndex: number = -1;
   @State currentAudioTrack: string = '默认音轨';
   @State currentSubtitleLabel: string = '未加载';
+  @State webDavBaseUrl: string = '';
+  @State webDavUsername: string = '';
+  @State webDavPassword: string = '';
+  @State webDavPath: string = '/';
+  @State webDavEntries: WebDavEntry[] = [];
+  @State webDavMessage: string = '';
+  @State webDavLoading: boolean = false;
   @State gestureHint: string = '';
   @State playerKernelMode: string = 'video-component';
   @State avPlayerSurfaceId: string = '';
@@ -68,6 +87,10 @@ struct Index {
   private playerKernelService: PlayerKernelService = GlobalContext.getPlayerKernelService();
   private storageService = GlobalContext.getStorageService();
   private permissionService: PermissionService = new PermissionService();
+  private backgroundPlaybackService = GlobalContext.getBackgroundPlaybackService();
+  private lastSessionUpdateAt: number = 0;
+  private wasPlayingBeforeInterrupt: boolean = false;
+  private volumeBeforeDuck: number | null = null;
 
   aboutToAppear(): void {
     this.bindAVPlayerListeners();
@@ -78,6 +101,7 @@ struct Index {
   aboutToDisappear(): void {
     this.persistCurrentItem();
     this.avPlayerService.release();
+    this.backgroundPlaybackService.ensureStopped();
     this.setPreferredOrientation(window.Orientation.PORTRAIT);
   }
 
@@ -117,11 +141,10 @@ struct Index {
 
     const merged = this.findExistingMedia(this.currentMediaItem.uri);
     if (merged) {
-      this.currentMediaItem = {
-        ...merged,
+      Object.assign(this.currentMediaItem, merged, {
         lastPosition: this.currentTime,
         duration: this.duration > 0 ? this.duration : merged.duration
-      };
+      });
     }
   }
 
@@ -131,6 +154,44 @@ struct Index {
 
   private getObjectFitMode(): ImageFit {
     return this.fitMode === 'cover' ? ImageFit.Cover : ImageFit.Contain;
+  }
+
+  private supportsPreciseVolumeControl(): boolean {
+    return this.isUsingAVPlayer();
+  }
+
+  private getVolumeDisplayText(): string {
+    if (this.supportsPreciseVolumeControl()) {
+      return `${Math.round(this.playerVolume * 100)}%`;
+    }
+    return this.playerVolume <= 0 ? '静音' : '跟随系统';
+  }
+
+  private getVolumeDownLabel(): string {
+    return this.supportsPreciseVolumeControl() ? '-音量' : '静音';
+  }
+
+  private getVolumeUpLabel(): string {
+    return this.supportsPreciseVolumeControl() ? '+音量' : '开声';
+  }
+
+  private supportsSubtitleFeature(): boolean {
+    return this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'externalSubtitle');
+  }
+
+  private supportsSubtitleOffsetFeature(): boolean {
+    return this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'subtitleOffset');
+  }
+
+  private supportsAudioTrackFeature(): boolean {
+    return this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'multiAudioTrack');
+  }
+
+  private getTrackPanelHint(): string {
+    if (this.supportsAudioTrackFeature()) {
+      return '当前内核支持真实多音轨切换。';
+    }
+    return '当前版本仅预留字幕/音轨入口，真实切换尚未接入 AVPlayer 或 Native 内核。';
   }
 
   private isUsingAVPlayer(): boolean {
@@ -150,11 +211,16 @@ struct Index {
         if (this.currentTime > 0) {
           this.avPlayerService.seek(this.currentTime);
         }
+        this.updateSubtitleRender(this.currentTime);
+        this.refreshAudioTracks();
+        this.maybeUpdateBackgroundSession();
       },
       onTimeUpdate: (currentTimeSeconds: number) => {
         if (!this.isDraggingProgress) {
           this.currentTime = currentTimeSeconds;
           this.syncCurrentItemProgress();
+          this.updateSubtitleRender(currentTimeSeconds);
+          this.maybeUpdateBackgroundSession();
         }
       },
       onDurationUpdate: (durationSeconds: number) => {
@@ -164,15 +230,19 @@ struct Index {
         this.isPlaying = true;
         this.isLoading = false;
         this.markCurrentPlaySession();
+        this.startBackgroundPlaybackIfNeeded();
       },
       onPause: () => {
         this.isPlaying = false;
         this.persistCurrentItem();
+        this.backgroundPlaybackService.ensureStopped();
       },
       onCompletion: () => {
         this.isPlaying = false;
         this.isCompleted = true;
         this.currentTime = 0;
+        this.updateSubtitleRender(0);
+        this.backgroundPlaybackService.ensureStopped();
         if (this.currentMediaItem) {
           this.currentMediaItem.lastPosition = 0;
           this.currentMediaItem.isCompleted = true;
@@ -182,9 +252,160 @@ struct Index {
       },
       onError: (message: string) => {
         this.handlePlaybackFailure(message);
+        this.backgroundPlaybackService.ensureStopped();
+      },
+      onAudioInterrupt: (event: unknown) => {
+        this.handleAudioInterrupt(event);
       }
     };
     this.avPlayerService.setListener(listener);
+  }
+
+  private handleAudioInterrupt(event: unknown): void {
+    // Refer to Audio focus guide: interruptEvent.forceType + interruptEvent.hintType. Keep logic tolerant to API variations.
+    const interruptEvent = event as unknown as {
+      forceType?: number;
+      hintType?: number;
+    };
+    const hintType = interruptEvent?.hintType;
+
+    if (hintType === audio.InterruptHint.INTERRUPT_HINT_PAUSE) {
+      this.wasPlayingBeforeInterrupt = this.isPlaying;
+      if (this.isPlaying) {
+        this.avPlayerService.pause();
+        this.isPlaying = false;
+        this.gestureHint = '音频被系统打断：已暂停';
+      }
+      this.backgroundPlaybackService.ensureStopped();
+      return;
+    }
+
+    if (hintType === audio.InterruptHint.INTERRUPT_HINT_RESUME) {
+      if (this.wasPlayingBeforeInterrupt && this.isPrepared && !this.hasPlayableError) {
+        this.avPlayerService.play();
+        this.isPlaying = true;
+        this.gestureHint = '音频焦点已恢复：继续播放';
+        this.startBackgroundPlaybackIfNeeded();
+      }
+      this.wasPlayingBeforeInterrupt = false;
+      return;
+    }
+
+    if (hintType === audio.InterruptHint.INTERRUPT_HINT_STOP) {
+      this.wasPlayingBeforeInterrupt = false;
+      this.avPlayerService.stop();
+      this.isPlaying = false;
+      this.gestureHint = '音频被系统打断：已停止';
+      this.backgroundPlaybackService.ensureStopped();
+      return;
+    }
+
+    if (hintType === audio.InterruptHint.INTERRUPT_HINT_DUCK) {
+      // Reduce volume temporarily, only when AVPlayer supports precise volume.
+      if (this.supportsPreciseVolumeControl() && this.volumeBeforeDuck === null) {
+        this.volumeBeforeDuck = this.playerVolume;
+        const ducked = Math.max(0, Math.min(this.playerVolume * 0.2, 1));
+        this.playerVolume = ducked;
+        this.playerService.setVolume(ducked);
+        this.avPlayerService.setVolume(ducked);
+        this.gestureHint = '音频焦点变化：已降低音量';
+      }
+      return;
+    }
+
+    if (hintType === audio.InterruptHint.INTERRUPT_HINT_UNDUCK) {
+      if (this.supportsPreciseVolumeControl() && this.volumeBeforeDuck !== null) {
+        const restored = this.volumeBeforeDuck;
+        this.volumeBeforeDuck = null;
+        this.playerVolume = restored;
+        this.playerService.setVolume(restored);
+        this.avPlayerService.setVolume(restored);
+        this.gestureHint = '音频焦点变化：已恢复音量';
+      }
+    }
+  }
+
+  private startBackgroundPlaybackIfNeeded(): void {
+    if (!this.currentMediaItem) {
+      return;
+    }
+    // Only start when actually playing, otherwise the system may cancel the task.
+    this.backgroundPlaybackService.ensureStarted(this.currentMediaItem, this.duration, this.currentTime, true);
+  }
+
+  private maybeUpdateBackgroundSession(): void {
+    if (!this.currentMediaItem) {
+      return;
+    }
+    const now = Date.now();
+    if (now - this.lastSessionUpdateAt < 2000) {
+      return;
+    }
+    this.lastSessionUpdateAt = now;
+    this.backgroundPlaybackService.updateSessionState(
+      this.currentMediaItem,
+      this.duration,
+      this.currentTime,
+      this.isPlaying
+    );
+  }
+
+  private async listWebDavDirectory(): Promise<void> {
+    const baseUrl = this.webDavBaseUrl.trim();
+    if (!baseUrl.startsWith('http://') && !baseUrl.startsWith('https://')) {
+      this.webDavMessage = '请输入有效的 WebDAV 地址（http/https）。';
+      return;
+    }
+    this.webDavLoading = true;
+    this.webDavMessage = '正在读取目录...';
+    try {
+      const entries = await WebDavService.listDirectory(
+        baseUrl,
+        this.webDavPath,
+        this.webDavUsername.trim(),
+        this.webDavPassword
+      );
+      this.webDavEntries = entries;
+      this.webDavMessage = entries.length > 0 ? `已读取 ${entries.length} 项` : '目录为空或无权限。';
+    } catch (err) {
+      console.error(`WebDAV list failed: ${err}`);
+      this.webDavEntries = [];
+      this.webDavMessage = (err as Error)?.message || 'WebDAV 列目录失败。';
+    } finally {
+      this.webDavLoading = false;
+    }
+  }
+
+  private setWebDavPathFromHref(href: string): void {
+    try {
+      const base = new URL(this.webDavBaseUrl.trim());
+      const entry = new URL(href);
+      const basePath = base.pathname.replace(/\/+$/, '');
+      const entryPath = entry.pathname;
+      let relative = entryPath.startsWith(basePath) ? entryPath.slice(basePath.length) : entryPath;
+      if (relative.length === 0) {
+        relative = '/';
+      }
+      if (!relative.startsWith('/')) {
+        relative = `/${relative}`;
+      }
+      this.webDavPath = relative;
+    } catch {
+      // Fallback: keep current path.
+    }
+  }
+
+  private async openWebDavEntry(entry: WebDavEntry): Promise<void> {
+    if (entry.isDirectory) {
+      this.setWebDavPathFromHref(entry.href);
+      await this.listWebDavDirectory();
+      return;
+    }
+
+    // Try to open with direct URL. If the WebDAV server requires auth headers, playback may fail.
+    this.showRemotePanel = false;
+    this.networkUrl = entry.href;
+    await this.openNetworkMedia();
   }
 
   private async setPreferredOrientation(orientation: window.Orientation): Promise<void> {
@@ -213,11 +434,15 @@ struct Index {
   }
 
   private adjustVolume(delta: number): void {
-    const nextVolume = Math.max(0, Math.min(this.playerVolume + delta, 1));
+    const nextVolume = this.supportsPreciseVolumeControl()
+      ? Math.max(0, Math.min(this.playerVolume + delta, 1))
+      : (delta < 0 ? 0 : 1);
     this.playerVolume = nextVolume;
     this.playerService.setVolume(nextVolume);
     this.avPlayerService.setVolume(nextVolume);
-    this.gestureHint = `音量 ${Math.round(nextVolume * 100)}%`;
+    this.gestureHint = this.supportsPreciseVolumeControl()
+      ? `音量 ${Math.round(nextVolume * 100)}%`
+      : (nextVolume <= 0 ? '已静音' : '已恢复音频输出');
   }
 
   private adjustProgress(delta: number): void {
@@ -231,24 +456,175 @@ struct Index {
       }
     }
     this.gestureHint = `进度 ${this.formatTime(nextTime)}`;
+    this.updateSubtitleRender(nextTime);
+    this.maybeUpdateBackgroundSession();
   }
 
   private adjustSubtitleOffset(delta: number): void {
+    if (!this.supportsSubtitleOffsetFeature()) {
+      this.gestureHint = '字幕偏移尚未实现';
+      return;
+    }
     this.subtitleOffsetSeconds = Math.max(-10, Math.min(this.subtitleOffsetSeconds + delta, 10));
+    this.updateSubtitleRender(this.currentTime);
   }
 
   private toggleSubtitle(): void {
+    if (!this.supportsSubtitleFeature()) {
+      this.subtitleEnabled = false;
+      this.currentSubtitleLabel = '未加载';
+      this.gestureHint = '外挂字幕尚未实现';
+      return;
+    }
+    if (this.subtitleCues.length === 0) {
+      this.subtitleEnabled = false;
+      this.currentSubtitleLabel = '未加载';
+      this.gestureHint = '请先选择字幕文件（.srt）';
+      return;
+    }
     this.subtitleEnabled = !this.subtitleEnabled;
-    this.currentSubtitleLabel = this.subtitleEnabled
-      ? (this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'externalSubtitle') ? '已启用外挂字幕' : '当前内核暂不支持外挂字幕渲染')
-      : '已关闭';
+    this.currentSubtitleLabel = this.subtitleEnabled ? '已启用' : '已关闭';
+    this.updateSubtitleRender(this.currentTime);
+  }
+
+  private getSubtitleFileName(): string {
+    if (this.subtitleUri.length === 0) {
+      return '未选择';
+    }
+    const segments = this.subtitleUri.split('/');
+    return segments.length > 0 ? segments[segments.length - 1] : this.subtitleUri;
+  }
+
+  private async pickSubtitleFile(): Promise<void> {
+    try {
+      const context = this.getUiContext();
+      const options = new picker.DocumentSelectOptions();
+      options.maxSelectNumber = 1;
+      options.fileSuffixFilters = ['字幕文件(.srt)|.srt', '所有文件(*.*)|.*'];
+      const documentPicker = new picker.DocumentViewPicker(context);
+      const result = await documentPicker.select(options);
+      if (!result || result.length === 0) {
+        return;
+      }
+      await this.loadSubtitleFromUri(result[0]);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`Pick subtitle failed: ${error.code}, ${error.message}`);
+      this.subtitleMessage = '选择字幕失败，请稍后重试。';
+    }
+  }
+
+  private clearSubtitle(): void {
+    this.subtitleUri = '';
+    this.subtitleCues = [];
+    this.subtitleText = '';
+    this.subtitleEnabled = false;
+    this.currentSubtitleLabel = '未加载';
+    this.subtitleMessage = '';
+  }
+
+  private async loadSubtitleFromUri(uri: string): Promise<void> {
+    this.subtitleMessage = '正在加载字幕...';
+    this.subtitleUri = uri;
+    this.subtitleText = '';
+    this.subtitleEnabled = false;
+    this.currentSubtitleLabel = '未加载';
+
+    try {
+      const content = await SubtitleService.readTextFromUri(uri);
+      const cues = SubtitleService.parseSrt(content);
+      this.subtitleCues = cues;
+      this.subtitleEnabled = cues.length > 0;
+      this.currentSubtitleLabel = cues.length > 0 ? '已启用' : '无有效字幕';
+      this.subtitleMessage = cues.length > 0 ? `已加载 ${cues.length} 条字幕` : '字幕文件解析成功，但未找到有效字幕条目。';
+      this.updateSubtitleRender(this.currentTime);
+    } catch (err) {
+      console.error(`Load subtitle failed: ${err}`);
+      this.subtitleCues = [];
+      this.subtitleEnabled = false;
+      this.currentSubtitleLabel = '加载失败';
+      this.subtitleMessage = (err as Error)?.message || '字幕加载失败。';
+    }
+  }
+
+  private resetAudioTracks(): void {
+    this.audioTracks = [];
+    this.selectedAudioTrackIndex = -1;
+    this.currentAudioTrack = '默认音轨';
+  }
+
+  private async refreshAudioTracks(): Promise<void> {
+    if (!this.isUsingAVPlayer() || !this.supportsAudioTrackFeature()) {
+      this.resetAudioTracks();
+      return;
+    }
+
+    try {
+      const tracks = await this.avPlayerService.getAudioTracks();
+      this.audioTracks = tracks;
+      if (this.selectedAudioTrackIndex >= 0) {
+        const stillExists = tracks.some((t: AVPlayerTrackSummary) => t.trackIndex === this.selectedAudioTrackIndex);
+        if (!stillExists) {
+          this.selectedAudioTrackIndex = -1;
+          this.currentAudioTrack = '默认音轨';
+        }
+      }
+      if (tracks.length === 0) {
+        this.currentAudioTrack = '无可枚举音轨';
+      }
+    } catch (err) {
+      console.error(`Refresh audio tracks failed: ${err}`);
+      this.audioTracks = [];
+      this.currentAudioTrack = '音轨枚举失败';
+    }
+  }
+
+  private updateSubtitleRender(currentTimeSeconds: number): void {
+    if (!this.subtitleEnabled || this.subtitleCues.length === 0) {
+      this.subtitleText = '';
+      return;
+    }
+    // Positive offset means subtitles show later, so we query "earlier" cues at (t - offset).
+    const adjustedMs = Math.floor((currentTimeSeconds - this.subtitleOffsetSeconds) * 1000);
+    const cue = SubtitleService.findCueAt(this.subtitleCues, adjustedMs);
+    this.subtitleText = cue ? cue.text : '';
   }
 
   private selectAudioTrack(trackName: string): void {
+    if (!this.supportsAudioTrackFeature()) {
+      this.gestureHint = '多音轨切换尚未实现';
+      return;
+    }
     this.currentAudioTrack = trackName;
-    this.gestureHint = this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'multiAudioTrack')
-      ? `已切换到 ${trackName}`
-      : '当前内核暂不支持多音轨切换，已记录偏好';
+    this.gestureHint = `已切换到 ${trackName}`;
+  }
+
+  private async selectAudioTrackByIndex(trackIndex: number): Promise<void> {
+    if (!this.supportsAudioTrackFeature() || !this.isUsingAVPlayer()) {
+      this.gestureHint = '当前内核不支持音轨切换';
+      return;
+    }
+
+    try {
+      if (trackIndex < 0) {
+        if (this.selectedAudioTrackIndex >= 0) {
+          await this.avPlayerService.deselectTrack(this.selectedAudioTrackIndex);
+        }
+        this.selectedAudioTrackIndex = -1;
+        this.currentAudioTrack = '默认音轨';
+        this.gestureHint = '已恢复默认音轨';
+        return;
+      }
+
+      await this.avPlayerService.selectTrack(trackIndex);
+      const selected = this.audioTracks.find((t: AVPlayerTrackSummary) => t.trackIndex === trackIndex);
+      this.selectedAudioTrackIndex = trackIndex;
+      this.currentAudioTrack = selected?.label ?? `音轨 ${trackIndex}`;
+      this.gestureHint = `已切换到 ${this.currentAudioTrack}`;
+    } catch (err) {
+      console.error(`Select audio track failed: ${err}`);
+      this.gestureHint = '音轨切换失败';
+    }
   }
 
   private async switchKernel(mode: string): Promise<void> {
@@ -262,6 +638,7 @@ struct Index {
     }
     this.playerKernelMode = mode;
     this.resetPlaybackFlags();
+    this.resetAudioTracks();
     this.gestureHint = `已切换到 ${this.playerKernelService.getKernelByMode(mode).displayName}`;
 
     if (this.currentMediaItem && this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
@@ -310,6 +687,7 @@ struct Index {
     } else if (this.currentMediaItem && this.isPrepared) {
       this.videoController.stop();
     }
+    this.backgroundPlaybackService.ensureStopped();
     this.isPlaying = false;
     this.isPrepared = false;
     this.isLoading = false;
@@ -321,6 +699,7 @@ struct Index {
     this.isPlaying = false;
     this.hasPlayableError = true;
     this.errorMessage = message;
+    this.backgroundPlaybackService.ensureStopped();
   }
 
   private getSelectVideoErrorMessage(error: BusinessError): string {
@@ -399,6 +778,8 @@ struct Index {
     this.pendingOpenItem = null;
     this.showResumePrompt = false;
     this.resetPlaybackFlags();
+    this.clearSubtitle();
+    this.resetAudioTracks();
     await this.storageService.savePlayHistory(playable);
     this.updatePlaylist();
     await this.loadCollections();
@@ -521,6 +902,8 @@ struct Index {
     this.duration = item.duration;
     this.networkUrl = item.sourceType === 'network' ? item.uri : this.networkUrl;
     this.resetPlaybackFlags();
+    this.clearSubtitle();
+    this.resetAudioTracks();
     await this.storageService.savePlayHistory(item);
     this.updatePlaylist();
     await this.loadCollections();
@@ -622,6 +1005,7 @@ struct Index {
     } else {
       this.videoController.stop();
     }
+    this.backgroundPlaybackService.ensureStopped();
     this.isPlaying = false;
     this.currentTime = 0;
     this.isCompleted = false;
@@ -649,6 +1033,7 @@ struct Index {
       this.videoController.start();
     }
     this.isPlaying = true;
+    this.startBackgroundPlaybackIfNeeded();
   }
 
   private retryCurrent(): void {
@@ -689,6 +1074,8 @@ struct Index {
           this.videoController.setCurrentTime(this.currentTime, SeekMode.Accurate);
         }
       }
+      this.updateSubtitleRender(this.currentTime);
+      this.maybeUpdateBackgroundSession();
       this.persistCurrentItem();
     }
   }
@@ -799,26 +1186,33 @@ struct Index {
                     this.currentTime = Math.min(this.currentTime, duration);
                     this.videoController.setCurrentTime(this.currentTime, SeekMode.Accurate);
                   }
+                  this.maybeUpdateBackgroundSession();
                 })
                 .onUpdate((time: number) => {
                   if (!this.isDraggingProgress) {
                     this.currentTime = time;
                     this.syncCurrentItemProgress();
+                    this.updateSubtitleRender(time);
+                    this.maybeUpdateBackgroundSession();
                   }
                 })
                 .onStart(() => {
                   this.isPlaying = true;
                   this.isLoading = false;
                   this.markCurrentPlaySession();
+                  this.startBackgroundPlaybackIfNeeded();
                 })
                 .onPause(() => {
                   this.isPlaying = false;
                   this.persistCurrentItem();
+                  this.backgroundPlaybackService.ensureStopped();
                 })
                 .onFinish(() => {
                   this.isPlaying = false;
                   this.isCompleted = true;
                   this.currentTime = 0;
+                  this.updateSubtitleRender(0);
+                  this.backgroundPlaybackService.ensureStopped();
                   if (this.currentMediaItem) {
                     this.currentMediaItem.lastPosition = 0;
                     this.currentMediaItem.isCompleted = true;
@@ -831,6 +1225,7 @@ struct Index {
                     ? '网络播放失败，请检查链接是否有效、网络是否较弱，或稍后重试。'
                     : '视频播放失败，可能是文件不可访问或格式暂不支持。';
                   this.handlePlaybackFailure(networkMessage);
+                  this.backgroundPlaybackService.ensureStopped();
                 });
             }, (sessionKey: number) => sessionKey.toString());
           }
@@ -843,6 +1238,20 @@ struct Index {
               .backgroundColor('#99000000')
               .borderRadius(16)
               .margin({ bottom: 14 });
+          }
+
+          if (this.subtitleText.length > 0) {
+            Text(this.subtitleText)
+              .fontSize(16)
+              .fontColor(Color.White)
+              .textAlign(TextAlign.Center)
+              .maxLines(3)
+              .textOverflow({ overflow: TextOverflow.Clip })
+              .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+              .backgroundColor('#66000000')
+              .borderRadius(10)
+              .margin({ bottom: 52 })
+              .width('92%');
           }
         }
         .gesture(
@@ -1076,6 +1485,13 @@ struct Index {
               .onClick(() => {
                 this.showNetworkInput = !this.showNetworkInput;
               });
+
+            Button('WebDAV')
+              .fontSize(12)
+              .margin({ left: 8 })
+              .onClick(() => {
+                this.showRemotePanel = true;
+              });
           }
           .width('100%');
 
@@ -1160,7 +1576,7 @@ struct Index {
               .fontSize(12)
               .width('100%')
               .margin({ top: 4 });
-            Text(`音量：${Math.round(this.playerVolume * 100)}% · 字幕：${this.currentSubtitleLabel} · 音轨：${this.currentAudioTrack}`)
+            Text(`音量：${this.getVolumeDisplayText()} · 字幕：${this.currentSubtitleLabel} · 音轨：${this.currentAudioTrack}`)
               .fontSize(12)
               .width('100%')
               .margin({ top: 4 });
@@ -1185,13 +1601,13 @@ struct Index {
             .margin({ top: 4 });
 
           Row() {
-            Button('-音量')
+            Button(this.getVolumeDownLabel())
               .fontSize(12)
               .onClick(() => {
                 this.adjustVolume(-0.1);
               });
 
-            Button('+音量')
+            Button(this.getVolumeUpLabel())
               .fontSize(12)
               .margin({ left: 8 })
               .onClick(() => {
@@ -1408,6 +1824,13 @@ struct Index {
       dragBar: true,
       onDisappear: () => {
         this.showTrackPanel = false;
+      }
+    })
+    .bindSheet($$this.showRemotePanel, this.RemotePanelBuilder(), {
+      height: 560,
+      dragBar: true,
+      onDisappear: () => {
+        this.showRemotePanel = false;
       }
     });
   }
@@ -1713,7 +2136,7 @@ struct Index {
             Text(`画面：${this.getScaleModeLabel()} · 旋转 ${this.videoRotation}°`);
           }
           ListItem() {
-            Text(`音量：${Math.round(this.playerVolume * 100)}% · 倍速 ${this.currentSpeed}x`);
+            Text(`音量：${this.getVolumeDisplayText()} · 倍速 ${this.currentSpeed}x`);
           }
           ListItem() {
             Text(`字幕：${this.currentSubtitleLabel} · 偏移 ${this.subtitleOffsetSeconds}s`);
@@ -1744,8 +2167,28 @@ struct Index {
         .margin({ top: 20, bottom: 16 });
 
       Row() {
+        Button('选择字幕文件')
+          .fontSize(14)
+          .enabled(this.supportsSubtitleFeature())
+          .onClick(() => {
+            this.pickSubtitleFile();
+          });
+
+        Button('清除字幕')
+          .fontSize(14)
+          .margin({ left: 10 })
+          .enabled(this.subtitleUri.length > 0)
+          .onClick(() => {
+            this.clearSubtitle();
+          });
+      }
+      .width('90%')
+      .margin({ bottom: 12 });
+
+      Row() {
         Button(this.subtitleEnabled ? '关闭字幕' : '开启字幕')
           .fontSize(14)
+          .enabled(this.supportsSubtitleFeature())
           .onClick(() => {
             this.toggleSubtitle();
           });
@@ -1753,6 +2196,7 @@ struct Index {
         Button('-偏移')
           .fontSize(14)
           .margin({ left: 10 })
+          .enabled(this.supportsSubtitleOffsetFeature())
           .onClick(() => {
             this.adjustSubtitleOffset(-1);
           });
@@ -1760,6 +2204,7 @@ struct Index {
         Button('+偏移')
           .fontSize(14)
           .margin({ left: 10 })
+          .enabled(this.supportsSubtitleOffsetFeature())
           .onClick(() => {
             this.adjustSubtitleOffset(1);
           });
@@ -1770,10 +2215,23 @@ struct Index {
       Text(`字幕状态：${this.currentSubtitleLabel}`)
         .fontSize(13)
         .width('90%');
+      Text(`字幕文件：${this.getSubtitleFileName()}`)
+        .fontSize(12)
+        .fontColor('#6B7280')
+        .width('90%')
+        .margin({ top: 6 });
       Text(`字幕偏移：${this.subtitleOffsetSeconds}s`)
         .fontSize(13)
         .width('90%')
         .margin({ top: 6, bottom: 16 });
+
+      if (this.subtitleMessage.length > 0) {
+        Text(this.subtitleMessage)
+          .fontSize(12)
+          .fontColor('#2563EB')
+          .width('90%')
+          .margin({ bottom: 12 });
+      }
 
       Text('音轨切换')
         .fontSize(14)
@@ -1782,14 +2240,14 @@ struct Index {
         .margin({ bottom: 10 });
 
       List({ space: 8 }) {
-        ForEach(['默认音轨', '音轨 1', '音轨 2'], (trackName: string) => {
+        ForEach(['默认音轨'], (trackName: string) => {
           ListItem() {
             Row() {
               Text(trackName)
                 .fontSize(14)
                 .layoutWeight(1);
 
-              if (this.currentAudioTrack === trackName) {
+              if (this.selectedAudioTrackIndex < 0) {
                 Text('当前')
                   .fontSize(12)
                   .fontColor('#007DFF');
@@ -1799,19 +2257,147 @@ struct Index {
             .padding({ left: 15, right: 15, top: 12, bottom: 12 })
             .borderRadius(8)
             .backgroundColor('#F8F8F8')
+            .enabled(this.supportsAudioTrackFeature())
             .onClick(() => {
-              this.selectAudioTrack(trackName);
+              this.selectAudioTrackByIndex(-1);
             });
           }
         }, (trackName: string) => trackName);
+
+        ForEach(this.audioTracks, (track: AVPlayerTrackSummary) => {
+          ListItem() {
+            Row() {
+              Text(track.label)
+                .fontSize(14)
+                .layoutWeight(1);
+
+              if (this.selectedAudioTrackIndex === track.trackIndex) {
+                Text('当前')
+                  .fontSize(12)
+                  .fontColor('#007DFF');
+              }
+            }
+            .width('100%')
+            .padding({ left: 15, right: 15, top: 12, bottom: 12 })
+            .borderRadius(8)
+            .backgroundColor('#F8F8F8')
+            .enabled(this.supportsAudioTrackFeature())
+            .onClick(() => {
+              this.selectAudioTrackByIndex(track.trackIndex);
+            });
+          }
+        }, (track: AVPlayerTrackSummary) => track.trackIndex.toString());
       }
       .width('90%')
       .height('44%');
 
-      Text(this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'multiAudioTrack')
-        ? '当前内核支持真实多音轨切换。'
-        : '当前内核会记录字幕/音轨偏好，真实切换建议切到 AVPlayer 或 Native 内核。')
+      Text(this.getTrackPanelHint())
         .fontSize(12)
+        .fontColor('#6B7280')
+        .width('90%')
+        .margin({ top: 12 });
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Center);
+  }
+
+  @Builder
+  RemotePanelBuilder() {
+    Column() {
+      Text('远端：WebDAV')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+        .margin({ top: 20, bottom: 12 });
+
+      TextInput({ text: this.webDavBaseUrl, placeholder: 'WebDAV Base URL，例如 https://example.com/dav' })
+        .width('90%')
+        .backgroundColor('#F3F4F6')
+        .borderRadius(10)
+        .onChange((value: string) => {
+          this.webDavBaseUrl = value;
+        });
+
+      Row() {
+        TextInput({ text: this.webDavUsername, placeholder: '用户名（可选）' })
+          .layoutWeight(1)
+          .backgroundColor('#F3F4F6')
+          .borderRadius(10)
+          .onChange((value: string) => {
+            this.webDavUsername = value;
+          });
+
+        TextInput({ text: this.webDavPassword, placeholder: '密码（可选）' })
+          .layoutWeight(1)
+          .margin({ left: 10 })
+          .backgroundColor('#F3F4F6')
+          .borderRadius(10)
+          .onChange((value: string) => {
+            this.webDavPassword = value;
+          });
+      }
+      .width('90%')
+      .margin({ top: 10 });
+
+      Row() {
+        TextInput({ text: this.webDavPath, placeholder: '路径（例如 / 或 /Movies/ ）' })
+          .layoutWeight(1)
+          .backgroundColor('#F3F4F6')
+          .borderRadius(10)
+          .onChange((value: string) => {
+            this.webDavPath = value;
+          });
+
+        Button(this.webDavLoading ? '加载中' : '列目录')
+          .fontSize(14)
+          .margin({ left: 10 })
+          .enabled(!this.webDavLoading)
+          .onClick(() => {
+            this.listWebDavDirectory();
+          });
+      }
+      .width('90%')
+      .margin({ top: 10, bottom: 12 });
+
+      if (this.webDavMessage.length > 0) {
+        Text(this.webDavMessage)
+          .fontSize(12)
+          .fontColor('#2563EB')
+          .width('90%')
+          .margin({ bottom: 10 });
+      }
+
+      List({ space: 8 }) {
+        ForEach(this.webDavEntries, (entry: WebDavEntry) => {
+          ListItem() {
+            Row() {
+              Text(entry.isDirectory ? `[目录] ${entry.name}` : entry.name)
+                .fontSize(13)
+                .layoutWeight(1)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis });
+
+              if (!entry.isDirectory) {
+                Text(entry.sizeBytes > 0 ? `${Math.round(entry.sizeBytes / 1024)}KB` : '')
+                  .fontSize(11)
+                  .fontColor('#6B7280');
+              }
+            }
+            .width('100%')
+            .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+            .borderRadius(8)
+            .backgroundColor('#F8F8F8')
+            .onClick(() => {
+              this.openWebDavEntry(entry);
+            });
+          }
+        }, (entry: WebDavEntry) => entry.href);
+      }
+      .width('90%')
+      .height('58%');
+
+      Text('说明：若 WebDAV 服务器需要鉴权，列目录可用 Basic Auth，但直接播放可能因无法注入请求头而失败。')
+        .fontSize(11)
         .fontColor('#6B7280')
         .width('90%')
         .margin({ top: 12 });

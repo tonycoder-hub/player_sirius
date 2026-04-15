@@ -28,8 +28,8 @@ export class PlayerKernelService {
     featureFlags: {
       networkPlayback: true,
       hlsPlayback: true,
-      externalSubtitle: false,
-      subtitleOffset: false,
+      externalSubtitle: true,
+      subtitleOffset: true,
       multiAudioTrack: false,
       backgroundPlayback: false,
       audioFocus: false,
@@ -44,20 +44,20 @@ export class PlayerKernelService {
   private readonly nextKernel: PlaybackKernelDescriptor = {
     mode: 'avplayer-native',
     displayName: 'AVPlayer + Native',
-    status: 'planned',
+    status: 'in-progress',
     featureFlags: {
       networkPlayback: true,
       hlsPlayback: true,
       externalSubtitle: true,
       subtitleOffset: true,
       multiAudioTrack: true,
-      backgroundPlayback: true,
+      backgroundPlayback: false,
       audioFocus: true,
-      smb: true,
-      webdav: true,
-      ftp: true,
-      casting: true,
-      equalizer: true
+      smb: false,
+      webdav: false,
+      ftp: false,
+      casting: false,
+      equalizer: false
     }
   };
 

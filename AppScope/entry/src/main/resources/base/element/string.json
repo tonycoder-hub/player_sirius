@@ -25,6 +25,10 @@
       "value": "需要访问网络播放在线视频"
     },
     {
+      "name": "permission_keep_background_reason",
+      "value": "需要在后台持续播放音视频"
+    },
+    {
       "name": "page_title",
       "value": "Player Sirius"
     },
