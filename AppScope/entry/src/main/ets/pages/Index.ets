@@ -23,6 +23,7 @@ import { DlnaService } from '../services/DlnaService';
 import { BrightnessService } from '../services/BrightnessService';
 import { ThumbnailService } from '../services/ThumbnailService';
 import { LocalScanService } from '../services/LocalScanService';
+import { LocalMediaHttpServerService } from '../services/LocalMediaHttpServerService';
 
 const RESUME_THRESHOLD_SECONDS = 5;
 const MAX_LIBRARY_IMPORT_COUNT = 30;
@@ -125,6 +126,7 @@ struct Index {
   private permissionService: PermissionService = new PermissionService();
   private backgroundPlaybackService = GlobalContext.getBackgroundPlaybackService();
   private nativePlayerBridgeService = GlobalContext.getNativePlayerBridgeService();
+  private localMediaHttpServerService: LocalMediaHttpServerService = GlobalContext.getLocalMediaHttpServerService();
   private lastSessionUpdateAt: number = 0;
   private wasPlayingBeforeInterrupt: boolean = false;
   private volumeBeforeDuck: number | null = null;
@@ -146,6 +148,8 @@ struct Index {
     this.persistCurrentItem();
     this.avPlayerService.release();
     this.backgroundPlaybackService.ensureStopped();
+    this.nativePlayerBridgeService.release();
+    this.localMediaHttpServerService.stop();
     this.stopStallMonitor();
     this.restoreSystemBrightness();
     this.setPreferredOrientation(window.Orientation.PORTRAIT);
@@ -284,6 +288,10 @@ struct Index {
     return this.playerKernelMode === 'avplayer-native';
   }
 
+  private isUsingNativePlayer(): boolean {
+    return this.playerKernelMode === 'native-bridge';
+  }
+
   private getDesiredKernelModeForItem(item: MediaItem): string {
     if (this.kernelSelectionPolicy === 'manual') {
       return this.playerKernelMode;
@@ -300,6 +308,21 @@ struct Index {
 
   private async startPlaybackForCurrentItem(): Promise<void> {
     if (!this.currentMediaItem) {
+      return;
+    }
+    if (this.isUsingNativePlayer()) {
+      this.isLoading = true;
+      const prepared = this.nativePlayerBridgeService.prepare(this.currentMediaItem.uri, this.avPlayerSurfaceId);
+      if (!prepared) {
+        await this.handlePlaybackFailureWithRecovery('Native 内核当前不可用，正在回退到其他播放路径');
+        return;
+      }
+      this.isPrepared = true;
+      this.isLoading = false;
+      this.isPlaying = true;
+      this.nativePlayerBridgeService.play();
+      this.markCurrentPlaySession();
+      this.startBackgroundPlaybackIfNeeded();
       return;
     }
     if (this.isUsingAVPlayer()) {
@@ -488,7 +511,7 @@ struct Index {
     if (!this.currentMediaItem || this.currentMediaItem.sourceType !== 'network') {
       return;
     }
-    if (!this.isUsingAVPlayer() || !this.isPrepared || !this.isPlaying || this.hasPlayableError) {
+    if ((!(this.isUsingAVPlayer() || this.isUsingNativePlayer())) || !this.isPrepared || !this.isPlaying || this.hasPlayableError) {
       return;
     }
     const now = Date.now();
@@ -702,13 +725,16 @@ struct Index {
     return this.dlnaDevices.find((device: DlnaDevice) => device.usn === this.selectedDlnaDeviceUsn) ?? null;
   }
 
-  private getCurrentCastableUrl(): string {
+  private async getCurrentCastableUrl(): Promise<string> {
     if (!this.currentMediaItem) {
       return '';
     }
     const uri = this.currentMediaItem.uri.trim();
     if (uri.startsWith('http://') || uri.startsWith('https://')) {
       return uri;
+    }
+    if (uri.startsWith('file://') || this.currentMediaItem.sourceType === 'local') {
+      return await this.localMediaHttpServerService.registerMedia(uri, this.currentMediaItem.title);
     }
     return '';
   }
@@ -737,13 +763,13 @@ struct Index {
 
   private async castToSelectedDevice(): Promise<void> {
     const device = this.getSelectedDlnaDevice();
-    const mediaUrl = this.getCurrentCastableUrl();
+    const mediaUrl = await this.getCurrentCastableUrl();
     if (!device) {
       this.dlnaMessage = '请先选择设备';
       return;
     }
     if (mediaUrl.length === 0) {
-      this.dlnaMessage = '当前仅支持投送 HTTP/HTTPS 网络流，本地文件暂未转 HTTP 服务';
+      this.dlnaMessage = '当前媒体无法转换成可投送的 HTTP 地址';
       return;
     }
     this.dlnaMessage = '正在投送媒体...';
@@ -908,6 +934,8 @@ struct Index {
     if (this.isPrepared) {
       if (this.isUsingAVPlayer()) {
         this.avPlayerService.seek(nextTime);
+      } else if (this.isUsingNativePlayer()) {
+        this.nativePlayerBridgeService.seek(Math.floor(nextTime * 1000));
       } else {
         this.videoController.setCurrentTime(nextTime, SeekMode.Accurate);
       }
@@ -1126,9 +1154,8 @@ struct Index {
   private async onAVPlayerSurfaceLoad(): Promise<void> {
     this.avPlayerSurfaceId = this.xComponentController.getXComponentSurfaceId();
     await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
-    if (this.currentMediaItem && this.isUsingAVPlayer() && !this.isPrepared) {
-      this.isLoading = true;
-      await this.avPlayerService.open(this.currentMediaItem.uri, true);
+    if (this.currentMediaItem && (this.isUsingAVPlayer() || this.isUsingNativePlayer()) && !this.isPrepared) {
+      await this.startPlaybackForCurrentItem();
     }
   }
 
@@ -1166,7 +1193,9 @@ struct Index {
   }
 
   private stopCurrentPlaybackForSwitch(): void {
-    if (this.isUsingAVPlayer()) {
+    if (this.isUsingNativePlayer()) {
+      this.nativePlayerBridgeService.stop();
+    } else if (this.isUsingAVPlayer()) {
       this.avPlayerService.stop();
     } else if (this.currentMediaItem && this.isPrepared) {
       this.videoController.stop();
@@ -1185,6 +1214,7 @@ struct Index {
     this.errorMessage = message;
     this.isBuffering = false;
     this.backgroundPlaybackService.ensureStopped();
+    this.nativePlayerBridgeService.stop();
   }
 
   private getSelectVideoErrorMessage(error: BusinessError): string {
@@ -1467,6 +1497,8 @@ struct Index {
     if (this.isPlaying) {
       if (this.isUsingAVPlayer()) {
         this.avPlayerService.pause();
+      } else if (this.isUsingNativePlayer()) {
+        this.nativePlayerBridgeService.pause();
       } else {
         this.videoController.pause();
       }
@@ -1477,6 +1509,8 @@ struct Index {
 
     if (this.isUsingAVPlayer()) {
       this.avPlayerService.play();
+    } else if (this.isUsingNativePlayer()) {
+      this.nativePlayerBridgeService.play();
     } else {
       this.videoController.start();
     }
@@ -1488,7 +1522,9 @@ struct Index {
       return;
     }
 
-    if (this.isUsingAVPlayer()) {
+    if (this.isUsingNativePlayer()) {
+      this.nativePlayerBridgeService.stop();
+    } else if (this.isUsingAVPlayer()) {
       this.avPlayerService.stop();
     } else {
       this.videoController.stop();
@@ -1513,7 +1549,10 @@ struct Index {
     this.isCompleted = false;
     this.currentMediaItem.isCompleted = false;
     this.currentMediaItem.lastPosition = 0;
-    if (this.isUsingAVPlayer()) {
+    if (this.isUsingNativePlayer()) {
+      this.nativePlayerBridgeService.seek(0);
+      this.nativePlayerBridgeService.play();
+    } else if (this.isUsingAVPlayer()) {
       this.avPlayerService.seek(0);
       this.avPlayerService.play();
     } else {
@@ -1555,6 +1594,8 @@ struct Index {
       if (this.isPrepared) {
         if (this.isUsingAVPlayer()) {
           this.avPlayerService.seek(this.currentTime);
+        } else if (this.isUsingNativePlayer()) {
+          this.nativePlayerBridgeService.seek(Math.floor(this.currentTime * 1000));
         } else {
           this.videoController.setCurrentTime(this.currentTime, SeekMode.Accurate);
         }
@@ -1633,7 +1674,7 @@ struct Index {
     Column() {
       if (this.currentMediaItem) {
         Stack({ alignContent: Alignment.BottomCenter }) {
-          if (this.isUsingAVPlayer()) {
+          if (this.isUsingAVPlayer() || this.isUsingNativePlayer()) {
             XComponent({
               id: 'player_sirius_surface',
               type: XComponentType.SURFACE,
@@ -1863,6 +1904,15 @@ struct Index {
             .fontColor(this.playerKernelMode === 'avplayer-native' ? Color.White : Color.Black)
             .onClick(() => {
               this.switchKernel('avplayer-native');
+            });
+
+          Button('Native')
+            .fontSize(12)
+            .margin({ left: 8 })
+            .backgroundColor(this.playerKernelMode === 'native-bridge' ? '#007DFF' : '#F3F4F6')
+            .fontColor(this.playerKernelMode === 'native-bridge' ? Color.White : Color.Black)
+            .onClick(() => {
+              this.switchKernel('native-bridge');
             });
 
           Text(this.getKernelStatusText())
@@ -3133,7 +3183,7 @@ struct Index {
         Button('投送当前媒体')
           .fontSize(14)
           .margin({ left: 10 })
-          .enabled(this.getCurrentCastableUrl().length > 0 && this.selectedDlnaDeviceUsn.length > 0)
+          .enabled(this.currentMediaItem !== null && this.selectedDlnaDeviceUsn.length > 0)
           .onClick(() => {
             this.castToSelectedDevice();
           });
@@ -3203,7 +3253,7 @@ struct Index {
       .width('90%')
       .height('56%');
 
-      Text('说明：当前仅支持把 HTTP/HTTPS 网络流投送到支持 DLNA AVTransport 的 MediaRenderer，本地文件暂未暴露成本地 HTTP 服务。')
+      Text('说明：网络流会直接投送；本地/缓存媒体会先通过应用内本地 HTTP 服务暴露后再投送。')
         .fontSize(11)
         .fontColor('#6B7280')
         .width('90%')

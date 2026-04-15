@@ -1,4 +1,4 @@
-import { picker, fileShare, fileIo as fs } from '@kit.CoreFileKit';
+import { picker, fileShare, fileIo as fs, fileUri } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import type { common } from '@kit.AbilityKit';
 
@@ -59,7 +59,8 @@ export class LocalScanService {
     }
 
     try {
-      const names = await fs.listFile(folderUri, { recursion: true });
+      const baseDirectoryUri = new fileUri.FileUri(folderUri).getFullDirectoryUri();
+      const names = await fs.listFile(baseDirectoryUri, { recursion: true });
       for (const rel of names) {
         if (candidates.length >= maxCount) {
           break;
@@ -69,12 +70,17 @@ export class LocalScanService {
         if (!hit) {
           continue;
         }
-        candidates.push(`${folderUri}${rel}`);
+        candidates.push(LocalScanService.joinUri(baseDirectoryUri, rel));
       }
       return candidates;
     } catch {
       return [];
     }
   }
-}
 
+  private static joinUri(baseUri: string, relativePath: string): string {
+    const base = baseUri.replace(/\/+$/, '');
+    const rel = relativePath.replace(/^\/+/, '');
+    return `${base}/${rel}`;
+  }
+}

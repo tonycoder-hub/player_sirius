@@ -41,10 +41,10 @@ export class PlayerKernelService {
     }
   };
 
-  private readonly nextKernel: PlaybackKernelDescriptor = {
+  private readonly avPlayerKernel: PlaybackKernelDescriptor = {
     mode: 'avplayer-native',
-    displayName: 'AVPlayer + Native',
-    status: 'in-progress',
+    displayName: 'AVPlayer',
+    status: 'active',
     featureFlags: {
       networkPlayback: true,
       hlsPlayback: true,
@@ -61,30 +61,66 @@ export class PlayerKernelService {
     }
   };
 
+  private readonly nativeKernel: PlaybackKernelDescriptor = {
+    mode: 'native-bridge',
+    displayName: 'Native Bridge',
+    status: 'experimental',
+    featureFlags: {
+      networkPlayback: true,
+      hlsPlayback: true,
+      externalSubtitle: true,
+      subtitleOffset: true,
+      multiAudioTrack: true,
+      backgroundPlayback: true,
+      audioFocus: true,
+      smb: false,
+      webdav: true,
+      ftp: true,
+      casting: true,
+      equalizer: false
+    }
+  };
+
+  private readonly kernels: PlaybackKernelDescriptor[] = [
+    this.currentKernel,
+    this.avPlayerKernel,
+    this.nativeKernel
+  ];
+
   getCurrentKernel(): PlaybackKernelDescriptor {
     return this.currentKernel;
   }
 
   getPlannedKernel(): PlaybackKernelDescriptor {
-    return this.nextKernel;
+    return this.nativeKernel;
+  }
+
+  getAllKernels(): PlaybackKernelDescriptor[] {
+    return this.kernels.slice();
   }
 
   getKernelByMode(mode: string): PlaybackKernelDescriptor {
-    return mode === this.nextKernel.mode ? this.nextKernel : this.currentKernel;
+    return this.kernels.find((kernel: PlaybackKernelDescriptor) => kernel.mode === mode) ?? this.currentKernel;
   }
 
   getFallbackMode(mode: string): string {
-    return mode === this.nextKernel.mode ? this.currentKernel.mode : this.nextKernel.mode;
+    if (mode === this.nativeKernel.mode) {
+      return this.avPlayerKernel.mode;
+    }
+    if (mode === this.avPlayerKernel.mode) {
+      return this.currentKernel.mode;
+    }
+    return this.avPlayerKernel.mode;
   }
 
   getRecommendedModeForMedia(uri: string, sourceType: string): string {
     const normalized = uri.trim().toLowerCase();
     if (sourceType === 'network') {
       // Prefer AVPlayer for network flows because it exposes buffering, bitrate and focus handling.
-      return this.nextKernel.mode;
+      return this.avPlayerKernel.mode;
     }
     if (normalized.endsWith('.m3u8') || normalized.endsWith('.mpd') || normalized.endsWith('.flv')) {
-      return this.nextKernel.mode;
+      return this.avPlayerKernel.mode;
     }
     // Keep ArkUI Video as default local path and fallback candidate for simpler local files.
     return this.currentKernel.mode;

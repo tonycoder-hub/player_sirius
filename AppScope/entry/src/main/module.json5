@@ -51,6 +51,14 @@
           "abilities": ["EntryAbility"],
           "when": "inuse"
         }
+      },
+      {
+        "name": "ohos.permission.GET_NETWORK_INFO",
+        "reason": "$string:permission_get_network_info_reason",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
       }
     ]
   }
