@@ -73,6 +73,23 @@ export class PlayerKernelService {
     return mode === this.nextKernel.mode ? this.nextKernel : this.currentKernel;
   }
 
+  getFallbackMode(mode: string): string {
+    return mode === this.nextKernel.mode ? this.currentKernel.mode : this.nextKernel.mode;
+  }
+
+  getRecommendedModeForMedia(uri: string, sourceType: string): string {
+    const normalized = uri.trim().toLowerCase();
+    if (sourceType === 'network') {
+      // Prefer AVPlayer for network flows because it exposes buffering, bitrate and focus handling.
+      return this.nextKernel.mode;
+    }
+    if (normalized.endsWith('.m3u8') || normalized.endsWith('.mpd') || normalized.endsWith('.flv')) {
+      return this.nextKernel.mode;
+    }
+    // Keep ArkUI Video as default local path and fallback candidate for simpler local files.
+    return this.currentKernel.mode;
+  }
+
   supportsFeature(feature: keyof PlaybackFeatureFlags): boolean {
     return this.currentKernel.featureFlags[feature];
   }

@@ -108,6 +108,8 @@ struct Index {
   @State autoRetryCount: number = 0;
   @State weakNetHint: string = '';
   @State gestureHint: string = '';
+  @State kernelSelectionPolicy: string = 'auto';
+  @State lastFallbackMessage: string = '';
   @State playerKernelMode: string = 'video-component';
   @State avPlayerSurfaceId: string = '';
   @State videoSessionKey: number = 0;
@@ -123,6 +125,8 @@ struct Index {
   private playbackStartAtMs: number = 0;
   private lastPlaybackProgressAtMs: number = 0;
   private stallMonitorTimer: number = -1;
+  private attemptedKernelModes: string[] = [];
+  private fallbackInProgress: boolean = false;
 
   aboutToAppear(): void {
     this.bindAVPlayerListeners();
@@ -232,6 +236,77 @@ struct Index {
     return this.playerKernelMode === 'avplayer-native';
   }
 
+  private getDesiredKernelModeForItem(item: MediaItem): string {
+    if (this.kernelSelectionPolicy === 'manual') {
+      return this.playerKernelMode;
+    }
+    return this.playerKernelService.getRecommendedModeForMedia(item.uri, item.sourceType);
+  }
+
+  private initializeKernelAttempt(item: MediaItem): void {
+    const desiredMode = this.getDesiredKernelModeForItem(item);
+    this.playerKernelMode = desiredMode;
+    this.attemptedKernelModes = [desiredMode];
+    this.lastFallbackMessage = '';
+  }
+
+  private async startPlaybackForCurrentItem(): Promise<void> {
+    if (!this.currentMediaItem) {
+      return;
+    }
+    if (this.isUsingAVPlayer()) {
+      if (this.avPlayerSurfaceId.length > 0) {
+        this.isLoading = true;
+        await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
+        await this.avPlayerService.open(this.currentMediaItem.uri, true);
+      }
+      return;
+    }
+    this.videoSessionKey++;
+  }
+
+  private async handlePlaybackFailureWithRecovery(message: string): Promise<void> {
+    if (this.tryAutoRetryAfterNetworkFailure(message)) {
+      return;
+    }
+    const fallbackApplied = await this.tryKernelFallback(message);
+    if (fallbackApplied) {
+      return;
+    }
+    this.handlePlaybackFailure(message);
+  }
+
+  private async tryKernelFallback(reason: string): Promise<boolean> {
+    if (!this.currentMediaItem || this.fallbackInProgress) {
+      return false;
+    }
+
+    const fallbackMode = this.playerKernelService.getFallbackMode(this.playerKernelMode);
+    if (fallbackMode.length === 0 || this.attemptedKernelModes.includes(fallbackMode)) {
+      return false;
+    }
+
+    this.fallbackInProgress = true;
+    try {
+      const fromKernel = this.playerKernelService.getKernelByMode(this.playerKernelMode).displayName;
+      const toKernel = this.playerKernelService.getKernelByMode(fallbackMode).displayName;
+      this.attemptedKernelModes.push(fallbackMode);
+      this.currentMediaItem.lastPosition = this.currentTime;
+      this.stopCurrentPlaybackForSwitch();
+      this.playerKernelMode = fallbackMode;
+      this.resetPlaybackFlags();
+      this.resetAudioTracks();
+      this.lastFallbackMessage = `${fromKernel} 打开失败，已自动回退到 ${toKernel}`;
+      this.gestureHint = this.lastFallbackMessage;
+      this.errorMessage = '';
+      this.weakNetHint = reason;
+      await this.startPlaybackForCurrentItem();
+      return true;
+    } finally {
+      this.fallbackInProgress = false;
+    }
+  }
+
   private bindAVPlayerListeners(): void {
     const listener: AVPlayerListener = {
       onPrepared: (durationSeconds: number) => {
@@ -293,11 +368,7 @@ struct Index {
         this.persistCurrentItem();
       },
       onError: (message: string) => {
-        if (this.tryAutoRetryAfterNetworkFailure(message)) {
-          return;
-        }
-        this.handlePlaybackFailure(message);
-        this.backgroundPlaybackService.ensureStopped();
+        this.handlePlaybackFailureWithRecovery(message);
       },
       onAudioInterrupt: (event: unknown) => {
         this.handleAudioInterrupt(event);
@@ -958,23 +1029,41 @@ struct Index {
   }
 
   private async switchKernel(mode: string): Promise<void> {
-    if (this.playerKernelMode === mode) {
+    if (mode === 'auto') {
+      this.kernelSelectionPolicy = 'auto';
+      if (this.currentMediaItem) {
+        const desiredMode = this.getDesiredKernelModeForItem(this.currentMediaItem);
+        if (desiredMode !== this.playerKernelMode) {
+          this.persistCurrentItem();
+          this.stopCurrentPlaybackForSwitch();
+          this.initializeKernelAttempt(this.currentMediaItem);
+          this.resetPlaybackFlags();
+          this.resetAudioTracks();
+          this.gestureHint = `已切换到自动策略，当前使用 ${this.playerKernelService.getKernelByMode(desiredMode).displayName}`;
+          await this.startPlaybackForCurrentItem();
+          return;
+        }
+      }
+      this.gestureHint = '已切换到自动解码路径策略';
+      return;
+    }
+
+    if (this.playerKernelMode === mode && this.kernelSelectionPolicy === 'manual') {
       return;
     }
 
     this.persistCurrentItem();
-    if (this.isUsingAVPlayer()) {
-      await this.avPlayerService.stop();
-    }
+    this.stopCurrentPlaybackForSwitch();
+    this.kernelSelectionPolicy = 'manual';
     this.playerKernelMode = mode;
+    this.attemptedKernelModes = [mode];
+    this.lastFallbackMessage = '';
     this.resetPlaybackFlags();
     this.resetAudioTracks();
     this.gestureHint = `已切换到 ${this.playerKernelService.getKernelByMode(mode).displayName}`;
 
-    if (this.currentMediaItem && this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
-      this.isLoading = true;
-      await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
-      await this.avPlayerService.open(this.currentMediaItem.uri, true);
+    if (this.currentMediaItem) {
+      await this.startPlaybackForCurrentItem();
     }
   }
 
@@ -1015,6 +1104,7 @@ struct Index {
     this.firstFrameCostMs = 0;
     this.availableBitrates = [];
     this.weakNetHint = '';
+    this.lastFallbackMessage = '';
     this.playbackStartAtMs = Date.now();
     this.lastPlaybackProgressAtMs = Date.now();
   }
@@ -1116,19 +1206,14 @@ struct Index {
     this.networkUrl = playable.sourceType === 'network' ? playable.uri : this.networkUrl;
     this.pendingOpenItem = null;
     this.showResumePrompt = false;
+    this.initializeKernelAttempt(playable);
     this.resetPlaybackFlags();
     this.clearSubtitle();
     this.resetAudioTracks();
     await this.storageService.savePlayHistory(playable);
     this.updatePlaylist();
     await this.loadCollections();
-    if (this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
-      this.isLoading = true;
-      await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
-      await this.avPlayerService.open(playable.uri, true);
-    } else if (!this.isUsingAVPlayer()) {
-      this.videoSessionKey++;
-    }
+    await this.startPlaybackForCurrentItem();
   }
 
   private async confirmResumePlayback(resumeFromHistory: boolean): Promise<void> {
@@ -1240,19 +1325,14 @@ struct Index {
     this.currentTime = item.lastPosition;
     this.duration = item.duration;
     this.networkUrl = item.sourceType === 'network' ? item.uri : this.networkUrl;
+    this.initializeKernelAttempt(item);
     this.resetPlaybackFlags();
     this.clearSubtitle();
     this.resetAudioTracks();
     await this.storageService.savePlayHistory(item);
     this.updatePlaylist();
     await this.loadCollections();
-    if (this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
-      this.isLoading = true;
-      await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
-      await this.avPlayerService.open(item.uri, true);
-    } else if (!this.isUsingAVPlayer()) {
-      this.videoSessionKey++;
-    }
+    await this.startPlaybackForCurrentItem();
   }
 
   private async playFromPlaylist(index: number): Promise<void> {
@@ -1384,11 +1464,7 @@ struct Index {
     this.duration = this.currentMediaItem.duration;
     this.resetPlaybackFlags();
     this.weakNetHint = this.autoRetryCount > 0 ? `自动重试中（${this.autoRetryCount}/${NETWORK_AUTO_RETRY_LIMIT}）` : '';
-    if (this.isUsingAVPlayer() && this.avPlayerSurfaceId.length > 0) {
-      this.avPlayerService.open(this.currentMediaItem.uri, true);
-    } else if (!this.isUsingAVPlayer()) {
-      this.videoSessionKey++;
-    }
+    this.startPlaybackForCurrentItem();
   }
 
   private async toggleFavorite(item: MediaItem): Promise<void> {
@@ -1460,7 +1536,8 @@ struct Index {
 
   private getKernelStatusText(): string {
     const currentKernel = this.playerKernelService.getKernelByMode(this.playerKernelMode);
-    return `${currentKernel.displayName} · ${currentKernel.status}`;
+    const policyText = this.kernelSelectionPolicy === 'auto' ? '自动' : '手动';
+    return `${currentKernel.displayName} · ${currentKernel.status} · ${policyText}`;
   }
 
   private getScaleModeLabel(): string {
@@ -1564,8 +1641,7 @@ struct Index {
                   const networkMessage = this.currentMediaItem?.sourceType === 'network'
                     ? '网络播放失败，请检查链接是否有效、网络是否较弱，或稍后重试。'
                     : '视频播放失败，可能是文件不可访问或格式暂不支持。';
-                  this.handlePlaybackFailure(networkMessage);
-                  this.backgroundPlaybackService.ensureStopped();
+                  this.handlePlaybackFailureWithRecovery(networkMessage);
                 });
             }, (sessionKey: number) => sessionKey.toString());
           }
@@ -1689,8 +1765,17 @@ struct Index {
         .margin({ bottom: 10 });
 
         Row() {
+          Button('自动')
+            .fontSize(12)
+            .backgroundColor(this.kernelSelectionPolicy === 'auto' ? '#007DFF' : '#F3F4F6')
+            .fontColor(this.kernelSelectionPolicy === 'auto' ? Color.White : Color.Black)
+            .onClick(() => {
+              this.switchKernel('auto');
+            });
+
           Button('ArkUI Video')
             .fontSize(12)
+            .margin({ left: 8 })
             .backgroundColor(this.playerKernelMode === 'video-component' ? '#007DFF' : '#F3F4F6')
             .fontColor(this.playerKernelMode === 'video-component' ? Color.White : Color.Black)
             .onClick(() => {
@@ -1781,6 +1866,14 @@ struct Index {
           Text(this.errorMessage)
             .fontSize(13)
             .fontColor('#D9485F')
+            .width('100%')
+            .margin({ bottom: 12 });
+        }
+
+        if (this.lastFallbackMessage.length > 0) {
+          Text(this.lastFallbackMessage)
+            .fontSize(12)
+            .fontColor('#2563EB')
             .width('100%')
             .margin({ bottom: 12 });
         }
@@ -1895,6 +1988,10 @@ struct Index {
             Text(`当前内核：${this.getKernelStatusText()}`)
               .fontSize(14)
               .width('100%');
+            Text(`解码路径：${this.kernelSelectionPolicy === 'auto' ? '自动选择，失败可回退' : '手动指定，失败仍允许自动回退一次'}`)
+              .fontSize(12)
+              .width('100%')
+              .margin({ top: 4 });
 
             Text(`来源：${this.currentMediaItem.sourceType === 'network' ? '网络流' : '本地文件'}`)
               .fontSize(12)
