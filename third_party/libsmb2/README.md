@@ -19,6 +19,7 @@ third_party/libsmb2/
 - ArkTS 侧 `SMB` 配置输入、配置保存和远端面板 UI
 - `SmbService` 能力声明与 `smb://` URI 构造
 - `StorageService` 中的 SMB profile 持久化
+- 独立 `smb_client_bridge` NAPI 模块和 `libsmb2` CMake 探测骨架
 
 当前仓库尚未完成：
 

@@ -16,6 +16,7 @@ test -f docs/smb-integration.md
 echo "[3/4] native source snapshot"
 test -f AppScope/entry/src/main/cpp/CMakeLists.txt
 test -f AppScope/entry/src/main/cpp/native_player_bridge.cpp
+test -f AppScope/entry/src/main/cpp/smb_client_bridge.cpp
 test -d AppScope/entry/src/main/cpp/media_core
 test -d third_party/libsmb2
 

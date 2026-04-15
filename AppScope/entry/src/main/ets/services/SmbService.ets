@@ -3,6 +3,7 @@ export interface SmbCapability {
   backendName: string;
   blocker: string;
   features: string[];
+  version?: string;
 }
 
 export interface SmbConnectionProfile {
@@ -24,16 +25,81 @@ export interface SmbEntry {
   modifiedAt: number;
 }
 
+export interface SmbBridgeState {
+  sessionState: string;
+  profileName: string;
+  host: string;
+  port: number;
+  share: string;
+  username: string;
+  path: string;
+  lastError: string;
+}
+
+export interface SmbBridgeEvent extends SmbBridgeState {
+  type: string;
+  message: string;
+}
+
+type SmbBridgeEventListener = (event: SmbBridgeEvent) => void;
+
+interface SmbNativeBridge {
+  getCapability?: () => SmbCapability;
+  getState?: () => SmbBridgeState;
+  setEventListener?: (listener: SmbBridgeEventListener) => void;
+  clearEventListener?: () => void;
+  configureProfile?: (
+    profileName: string,
+    host: string,
+    port: number,
+    share: string,
+    username: string,
+    password: string,
+    path: string
+  ) => number;
+  listDirectory?: () => SmbEntry[];
+  openFile?: (path: string) => string;
+  release?: () => void;
+}
+
 const SMB_BLOCKER = '当前仓库尚未接入 libsmb2 Native 依赖，SMB/NAS 浏览暂不可用。';
 
 export class SmbService {
+  private bridge: SmbNativeBridge | null = null;
+
+  constructor() {
+    this.bridge = this.tryLoadBridge();
+  }
+
   getCapability(): SmbCapability {
-    return {
+    return this.bridge?.getCapability?.() ?? {
       available: false,
       backendName: 'libsmb2-placeholder',
       blocker: SMB_BLOCKER,
-      features: ['profile-storage', 'smb-uri-builder', 'native-dependency-slot']
+      features: ['profile-storage', 'smb-uri-builder', 'native-dependency-slot'],
+      version: 'stub'
     };
+  }
+
+  getState(): SmbBridgeState {
+    return this.bridge?.getState?.() ?? {
+      sessionState: 'unloaded',
+      profileName: '',
+      host: '',
+      port: 445,
+      share: '',
+      username: '',
+      path: '/',
+      lastError: ''
+    };
+  }
+
+  setEventListener(listener: SmbBridgeEventListener): void {
+    this.bridge?.setEventListener?.(listener);
+  }
+
+  clearEventListener(): void {
+    this.bridge?.clearEventListener?.();
   }
 
   sanitizeProfile(profile: Partial<SmbConnectionProfile>): SmbConnectionProfile {
@@ -65,7 +131,19 @@ export class SmbService {
     if (validationError.length > 0) {
       throw new Error(validationError);
     }
-    throw new Error(this.getCapability().blocker);
+    const configured = this.bridge?.configureProfile?.(
+      normalized.name,
+      normalized.host,
+      normalized.port,
+      normalized.share,
+      normalized.username,
+      normalized.password,
+      normalized.path
+    ) ?? -1;
+    if (configured !== 0) {
+      throw new Error(this.getState().lastError || this.getCapability().blocker);
+    }
+    return this.bridge?.listDirectory?.() ?? [];
   }
 
   async openFile(profile: SmbConnectionProfile, entry: SmbEntry): Promise<string> {
@@ -77,7 +155,23 @@ export class SmbService {
     if (entry.isDirectory) {
       throw new Error('目录不能直接播放，请先进入目录。');
     }
-    throw new Error(this.getCapability().blocker);
+    const configured = this.bridge?.configureProfile?.(
+      normalized.name,
+      normalized.host,
+      normalized.port,
+      normalized.share,
+      normalized.username,
+      normalized.password,
+      normalized.path
+    ) ?? -1;
+    if (configured !== 0) {
+      throw new Error(this.getState().lastError || this.getCapability().blocker);
+    }
+    const result = this.bridge?.openFile?.(entry.path) ?? '';
+    if (result.length === 0) {
+      throw new Error(this.getState().lastError || this.getCapability().blocker);
+    }
+    return result;
   }
 
   buildSmbUri(profile: SmbConnectionProfile, targetPath?: string): string {
@@ -97,5 +191,21 @@ export class SmbService {
     }
     const normalized = trimmed.replace(/\\/g, '/');
     return normalized.startsWith('/') ? normalized : `/${normalized}`;
+  }
+
+  release(): void {
+    this.bridge?.release?.();
+  }
+
+  private tryLoadBridge(): SmbNativeBridge | null {
+    try {
+      const maybeLoader = (globalThis as Record<string, (name: string) => SmbNativeBridge>).requireNapi;
+      if (typeof maybeLoader === 'function') {
+        return maybeLoader('smb_client_bridge');
+      }
+    } catch (err) {
+      console.warn(`SMB native bridge unavailable: ${err}`);
+    }
+    return null;
   }
 }

@@ -20,7 +20,7 @@ import type { FtpEntry } from '../services/FtpService';
 import { FtpService } from '../services/FtpService';
 import type { DlnaDevice, DlnaPlaybackStatus } from '../services/DlnaService';
 import { DlnaService } from '../services/DlnaService';
-import type { SmbConnectionProfile, SmbEntry } from '../services/SmbService';
+import type { SmbBridgeEvent, SmbConnectionProfile, SmbEntry } from '../services/SmbService';
 import { BrightnessService } from '../services/BrightnessService';
 import { ThumbnailService } from '../services/ThumbnailService';
 import { LocalScanService } from '../services/LocalScanService';
@@ -116,6 +116,7 @@ struct Index {
   @State smbSelectedProfileId: string = '';
   @State smbMessage: string = '';
   @State smbLoading: boolean = false;
+  @State smbBridgeSummary: string = 'libsmb2-placeholder';
   @State dlnaDevices: DlnaDevice[] = [];
   @State dlnaMessage: string = '';
   @State dlnaLoading: boolean = false;
@@ -160,6 +161,7 @@ struct Index {
   aboutToAppear(): void {
     this.bindAVPlayerListeners();
     this.bindNativePlayerListeners();
+    this.bindSmbBridgeListeners();
     this.syncPlayerState();
     this.loadCollections();
     this.startStallMonitor();
@@ -172,6 +174,8 @@ struct Index {
     this.backgroundPlaybackService.ensureStopped();
     this.nativePlayerBridgeService.release();
     this.nativePlayerBridgeService.clearEventListener();
+    this.smbService.release();
+    this.smbService.clearEventListener();
     this.localMediaHttpServerService.stop();
     this.stopStallMonitor();
     this.stopDlnaPolling();
@@ -221,6 +225,28 @@ struct Index {
     });
   }
 
+  private bindSmbBridgeListeners(): void {
+    this.smbService.setEventListener((event: SmbBridgeEvent) => {
+      this.refreshSmbBridgeSummary();
+      if (event.message.length > 0) {
+        this.smbMessage = event.message;
+      }
+    });
+  }
+
+  private refreshSmbBridgeSummary(): void {
+    const capability = this.smbService.getCapability();
+    const state = this.smbService.getState();
+    const version = capability.version && capability.version.length > 0 ? capability.version : 'stub';
+    const parts: string[] = [capability.backendName, version, state.sessionState];
+    if (state.lastError.length > 0) {
+      parts.push(state.lastError);
+    } else if (!capability.available && capability.blocker.length > 0) {
+      parts.push(capability.blocker);
+    }
+    this.smbBridgeSummary = parts.join(' · ');
+  }
+
   private handleNativePlayerEvent(event: NativePlayerEvent): void {
     this.refreshNativeBridgeSummary();
     if (event.type === 'error' && event.lastError.length > 0) {
@@ -242,6 +268,7 @@ struct Index {
     this.historyItems = await this.storageService.getPlayHistory();
     this.libraryItems = await this.storageService.getMediaLibrary();
     this.smbProfiles = await this.storageService.getSmbProfiles();
+    this.refreshSmbBridgeSummary();
     this.favoriteItems = this.libraryItems.filter((item: MediaItem) => item.isFavorite);
     this.folderNames = this.collectFolderNames(this.libraryItems);
     this.updateCurrentItemFromLibrary();
@@ -3602,6 +3629,12 @@ struct Index {
             .width('90%')
             .margin({ bottom: 10 });
         }
+
+        Text(`Native Bridge：${this.smbBridgeSummary}`)
+          .fontSize(11)
+          .fontColor('#6B7280')
+          .width('90%')
+          .margin({ bottom: 10 });
 
         if (this.smbProfiles.length > 0) {
           List({ space: 8 }) {
