@@ -1,6 +1,6 @@
 # 开发 Quickstart
 
-本文用于初始化 `Player Sirius` 的 HarmonyOS 开发环境。当前仓库还没有生成正式工程，因此这里先约定工具链、SDK 组件和最小启动流程，后续创建工程时直接按本文执行即可。
+本文用于初始化 `Player Sirius` 的 HarmonyOS 开发环境。当前仓库已经包含 ArkTS Stage Model 工程骨架，DevEco Studio 应打开仓库根目录，并通过根目录 `build-profile.json5` 识别 `AppScope/entry` 模块。
 
 ## 1. 推荐环境
 
@@ -72,15 +72,23 @@ hdc version
 ./hvigorw -v
 ```
 
-## 5. 初始化工程的推荐方式
+## 5. 打开现有工程
 
-当前仓库没有现成工程，建议按以下步骤初始化：
+当前工程已经落在仓库内，建议按以下步骤打开：
 
-1. 用 DevEco Studio 新建一个 ArkTS Stage Model 应用。
-2. 应用名建议使用 `player_sirius`，包名使用公司或组织域名反写形式。
-3. Compatible SDK 选择团队统一版本，建议从当前稳定 API 起步。
-4. 创建完成后，把 IDE 生成的主工程提交到当前仓库根目录。
-5. 立刻补充一个 Native 模块，用于承载后续的 `media_core`。
+1. 用 DevEco Studio 打开仓库根目录，而不是 `AppScope` 或 `AppScope/entry` 子目录。
+2. 等待 IDE 完成 Sync，确认 Project 视图或运行配置中出现 `entry` 模块。
+3. 如果本机 SDK 位置不同，更新未提交的 `local.properties`。
+4. 首次打开后由 IDE 重新生成 `.idea/`、`.hvigor/`、`build/` 等本机缓存。
+5. 执行 Build / Run，优先使用真机验证 Native、音频焦点和后台播放相关能力。
+
+如果 DevEco Studio 没有显示 `entry`：
+
+1. 确认打开的是仓库根目录。
+2. 关闭 DevEco Studio 后删除本机生成的 `.idea/` 与 `.hvigor/` 缓存目录，再重新打开仓库根目录并执行 Sync。
+3. 确认根目录 `build-profile.json5` 中存在 `modules[].name = "entry"`，且 `srcPath` 指向 `./AppScope/entry`。
+4. 确认 `AppScope/entry/src/main/module.json5` 中 `module.type` 为 `entry`。
+5. 不要提交 `.idea/` 与 `.hvigor/`，这些目录是本机 IDE/构建缓存，可能让其他工作区复用旧的模块识别结果。
 
 ## 6. 初始化后的建议目录
 
@@ -89,15 +97,14 @@ hdc version
 ```text
 .
 ├── AppScope/
-├── entry/                   # ArkUI 页面与应用入口
-├── modules/
-│   ├── player_service/
-│   └── media_library/
-├── native/
-│   ├── media_core/
-│   └── adapters/
+│   ├── app.json5
+│   └── entry/               # ArkUI 页面、应用入口与 Native bridge
 ├── docs/
-└── hvigor/
+├── scripts/
+├── third_party/
+├── build-profile.json5
+├── hvigorfile.ts
+└── oh-package.json5
 ```
 
 ## 7. 首次跑通最小链路
@@ -119,6 +126,6 @@ hdc version
 
 ## 9. 下一步建议
 
-- 先让仓库生成一个最小 HarmonyOS 工程骨架。
-- 接着增加 Native 模块和 ArkTS 到 Native 的桥接。
-- 最后再引入 FFmpeg、字幕库和网络协议能力，逐步把功能往 VLC 对齐。
+- 优先完成 SMB/NAS 真机联调。
+- 接着接入 FFmpeg 产物和目标平台 Native 输出 backend。
+- 最后补齐协议栈、媒体库和真机回归体系，逐步把功能往 VLC 对齐。
