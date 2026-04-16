@@ -1,6 +1,7 @@
 #include "platform_outputs.h"
 
 #include <algorithm>
+#include <mutex>
 
 #include "audio_resampler.h"
 
@@ -96,39 +97,46 @@ public:
 
     void Reset() override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_ = PlaybackMetrics();
         last_stage_.clear();
     }
 
     void OnStageChanged(const std::string& stage) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         last_stage_ = stage;
         metrics_.emitted_events += 1;
     }
 
     void OnPrepared(const SourceSpec& source) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         (void)source;
         metrics_.buffered_duration_ms = 0;
     }
 
     void OnPlay() override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.emitted_events += 1;
     }
 
     void OnPause() override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.emitted_events += 1;
     }
 
     void OnSeek(int64_t position_ms) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.buffered_duration_ms = std::max<int64_t>(0, metrics_.buffered_duration_ms - position_ms);
     }
 
     void OnDecodeFrame(bool audio, bool video) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (audio) {
             metrics_.decoded_audio_frames += 1;
         }
@@ -139,6 +147,7 @@ public:
 
     void OnRenderFrame(bool audio, bool video) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (audio) {
             metrics_.rendered_audio_frames += 1;
         }
@@ -149,16 +158,19 @@ public:
 
     void OnDropVideoFrame() override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.dropped_video_frames += 1;
     }
 
     void OnBufferedDuration(int64_t buffered_duration_ms) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.buffered_duration_ms = std::max<int64_t>(0, buffered_duration_ms);
     }
 
     void OnQueueDepths(int64_t packet_queue_depth, int64_t audio_queue_depth, int64_t video_queue_depth) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.packet_queue_depth = std::max<int64_t>(0, packet_queue_depth);
         metrics_.audio_queue_depth = std::max<int64_t>(0, audio_queue_depth);
         metrics_.video_queue_depth = std::max<int64_t>(0, video_queue_depth);
@@ -166,20 +178,24 @@ public:
 
     void OnAudioClock(int64_t position_ms) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.audio_clock_ms = std::max<int64_t>(0, position_ms);
     }
 
     void OnVideoClock(int64_t position_ms) override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         metrics_.video_clock_ms = std::max<int64_t>(0, position_ms);
     }
 
     PlaybackMetrics Snapshot() const override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         return metrics_;
     }
 
 private:
+    mutable std::mutex mutex_;
     PlaybackMetrics metrics_;
     std::string last_stage_;
 };

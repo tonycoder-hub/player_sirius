@@ -1,6 +1,7 @@
 #include <node_api.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -9,8 +10,7 @@
 namespace {
 
 player_sirius::NativePlayerCore g_player_core;
-napi_env g_listener_env = nullptr;
-napi_ref g_listener_ref = nullptr;
+napi_threadsafe_function g_event_tsfn = nullptr;
 
 napi_value CreateMetricsObject(napi_env env, const player_sirius::PlaybackMetrics& metrics);
 
@@ -72,53 +72,65 @@ bool ReadInt64Arg(napi_env env, napi_value value, int64_t* output)
     return napi_get_value_int64(env, value, output) == napi_ok;
 }
 
-void ClearEventListener(napi_env env)
+void ClearEventListener()
 {
-    if (g_listener_ref != nullptr && env != nullptr) {
-        napi_delete_reference(env, g_listener_ref);
+    if (g_event_tsfn != nullptr) {
+        // Abort pending calls; the JS callback may be gone during page teardown.
+        napi_release_threadsafe_function(g_event_tsfn, napi_tsfn_abort);
     }
-    g_listener_ref = nullptr;
-    g_listener_env = nullptr;
+    g_event_tsfn = nullptr;
 }
 
-void DispatchEventToJs(const player_sirius::Event& event)
+void CallJsEvent(napi_env env, napi_value js_callback, void* context, void* data)
 {
-    if (g_listener_env == nullptr || g_listener_ref == nullptr) {
+    (void)context;
+    std::unique_ptr<player_sirius::Event> event(static_cast<player_sirius::Event*>(data));
+    if (env == nullptr || js_callback == nullptr || event == nullptr) {
         return;
     }
 
     napi_handle_scope scope = nullptr;
-    if (napi_open_handle_scope(g_listener_env, &scope) != napi_ok) {
+    if (napi_open_handle_scope(env, &scope) != napi_ok) {
         return;
     }
 
-    napi_value callback = nullptr;
     napi_value global = nullptr;
     napi_value js_event = nullptr;
     napi_value ignored = nullptr;
 
-    if (napi_get_reference_value(g_listener_env, g_listener_ref, &callback) != napi_ok ||
-        napi_get_global(g_listener_env, &global) != napi_ok ||
-        napi_create_object(g_listener_env, &js_event) != napi_ok) {
-        napi_close_handle_scope(g_listener_env, scope);
+    if (napi_get_global(env, &global) != napi_ok || napi_create_object(env, &js_event) != napi_ok) {
+        napi_close_handle_scope(env, scope);
         return;
     }
 
-    napi_set_named_property(g_listener_env, js_event, "type", MakeString(g_listener_env, event.type));
-    napi_set_named_property(g_listener_env, js_event, "message", MakeString(g_listener_env, event.message));
-    napi_set_named_property(g_listener_env, js_event, "state",
-        MakeString(g_listener_env, player_sirius::ToString(event.snapshot.state)));
-    napi_set_named_property(g_listener_env, js_event, "source", MakeString(g_listener_env, event.snapshot.source));
-    napi_set_named_property(g_listener_env, js_event, "surfaceId", MakeString(g_listener_env, event.snapshot.surface_id));
-    napi_set_named_property(g_listener_env, js_event, "positionMs", MakeInt64(g_listener_env, event.snapshot.position_ms));
-    napi_set_named_property(g_listener_env, js_event, "lastError", MakeString(g_listener_env, event.snapshot.last_error));
-    napi_set_named_property(g_listener_env, js_event, "backendName", MakeString(g_listener_env, event.snapshot.backend_name));
-    napi_set_named_property(g_listener_env, js_event, "stage", MakeString(g_listener_env, event.snapshot.stage));
-    napi_set_named_property(g_listener_env, js_event, "errorStage", MakeString(g_listener_env, event.snapshot.error_stage));
-    napi_set_named_property(g_listener_env, js_event, "metrics", CreateMetricsObject(g_listener_env, event.snapshot.metrics));
+    napi_set_named_property(env, js_event, "type", MakeString(env, event->type));
+    napi_set_named_property(env, js_event, "message", MakeString(env, event->message));
+    napi_set_named_property(env, js_event, "state",
+        MakeString(env, player_sirius::ToString(event->snapshot.state)));
+    napi_set_named_property(env, js_event, "source", MakeString(env, event->snapshot.source));
+    napi_set_named_property(env, js_event, "surfaceId", MakeString(env, event->snapshot.surface_id));
+    napi_set_named_property(env, js_event, "positionMs", MakeInt64(env, event->snapshot.position_ms));
+    napi_set_named_property(env, js_event, "lastError", MakeString(env, event->snapshot.last_error));
+    napi_set_named_property(env, js_event, "backendName", MakeString(env, event->snapshot.backend_name));
+    napi_set_named_property(env, js_event, "stage", MakeString(env, event->snapshot.stage));
+    napi_set_named_property(env, js_event, "errorStage", MakeString(env, event->snapshot.error_stage));
+    napi_set_named_property(env, js_event, "metrics", CreateMetricsObject(env, event->snapshot.metrics));
 
-    napi_call_function(g_listener_env, global, callback, 1, &js_event, &ignored);
-    napi_close_handle_scope(g_listener_env, scope);
+    napi_call_function(env, global, js_callback, 1, &js_event, &ignored);
+    napi_close_handle_scope(env, scope);
+}
+
+void DispatchEventToJs(const player_sirius::Event& event)
+{
+    if (g_event_tsfn == nullptr) {
+        return;
+    }
+    // Must marshal to JS thread. NativePlayerCore emits from both JS thread and runtime monitor thread.
+    auto* payload = new player_sirius::Event(event);
+    const napi_status status = napi_call_threadsafe_function(g_event_tsfn, payload, napi_tsfn_nonblocking);
+    if (status != napi_ok) {
+        delete payload;
+    }
 }
 
 napi_value CreateCapabilityObject(napi_env env, const player_sirius::Capability& capability)
@@ -190,18 +202,29 @@ napi_value SetEventListener(napi_env env, napi_callback_info info)
     napi_value argv[1] = {nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
 
-    ClearEventListener(env);
+    ClearEventListener();
+    g_player_core.SetEventSink(nullptr);
+
     if (argc > 0 && argv[0] != nullptr) {
         napi_valuetype value_type = napi_undefined;
         if (napi_typeof(env, argv[0], &value_type) == napi_ok && value_type == napi_function) {
-            napi_create_reference(env, argv[0], 1, &g_listener_ref);
-            g_listener_env = env;
-            g_player_core.SetEventSink(DispatchEventToJs);
-        } else {
-            g_player_core.SetEventSink(nullptr);
+            napi_value resource_name = nullptr;
+            napi_create_string_utf8(env, "native_player_bridge_event", NAPI_AUTO_LENGTH, &resource_name);
+            if (napi_create_threadsafe_function(
+                    env,
+                    argv[0],
+                    nullptr,
+                    resource_name,
+                    0,
+                    1,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    &CallJsEvent,
+                    &g_event_tsfn) == napi_ok) {
+                g_player_core.SetEventSink(DispatchEventToJs);
+            }
         }
-    } else {
-        g_player_core.SetEventSink(nullptr);
     }
 
     napi_value undefined = nullptr;
@@ -211,7 +234,7 @@ napi_value SetEventListener(napi_env env, napi_callback_info info)
 
 napi_value ClearListener(napi_env env, napi_callback_info info)
 {
-    ClearEventListener(env);
+    ClearEventListener();
     g_player_core.SetEventSink(nullptr);
     napi_value undefined = nullptr;
     napi_get_undefined(env, &undefined);
@@ -308,4 +331,4 @@ napi_value Init(napi_env env, napi_value exports)
 
 } // namespace
 
-NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+NAPI_MODULE(native_player_bridge, Init)

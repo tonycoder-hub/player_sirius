@@ -256,7 +256,11 @@ MediaPipeline::MediaPipeline(
 {
 }
 
-MediaPipeline::~MediaPipeline() = default;
+MediaPipeline::~MediaPipeline()
+{
+    // Ensure worker thread and platform outputs are released even if caller forgets to call Release().
+    Release();
+}
 
 bool MediaPipeline::Prepare(const SourceSpec& source, std::string* error)
 {
@@ -436,6 +440,7 @@ void MediaPipeline::Release()
 
 std::string MediaPipeline::Stage() const
 {
+    std::lock_guard<std::mutex> lock(stage_mutex_);
     return stage_;
 }
 
@@ -449,7 +454,10 @@ PlaybackMetrics MediaPipeline::Metrics() const
 
 void MediaPipeline::SetStage(const std::string& stage)
 {
-    stage_ = stage;
+    {
+        std::lock_guard<std::mutex> lock(stage_mutex_);
+        stage_ = stage;
+    }
     if (stats_collector_) {
         stats_collector_->OnStageChanged(stage);
     }

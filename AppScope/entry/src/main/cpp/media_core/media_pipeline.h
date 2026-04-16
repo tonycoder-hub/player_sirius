@@ -58,6 +58,7 @@ private:
     MediaQueue<MediaFrame> video_frame_queue_{48};
     SyncController sync_controller_;
     SourceSpec source_;
+    mutable std::mutex stage_mutex_;
     std::string stage_ = "idle";
     bool prepared_ = false;
     std::atomic<bool> playing_{false};

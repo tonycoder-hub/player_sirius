@@ -59,8 +59,8 @@ interface SmbNativeBridge {
     password: string,
     path: string
   ) => number;
-  listDirectory?: () => SmbEntry[];
-  openFile?: (path: string, cacheDir: string, suggestedName: string) => string;
+  listDirectory?: () => Promise<SmbEntry[]> | SmbEntry[];
+  openFile?: (path: string, cacheDir: string, suggestedName: string) => Promise<string> | string;
   release?: () => void;
 }
 
@@ -150,7 +150,8 @@ export class SmbService {
     if (configured !== 0) {
       throw new Error(this.getState().lastError || this.getCapability().blocker);
     }
-    return this.bridge?.listDirectory?.() ?? [];
+    const result = this.bridge?.listDirectory?.();
+    return await Promise.resolve(result ?? []);
   }
 
   async openFile(profile: SmbConnectionProfile, entry: SmbEntry): Promise<string> {
@@ -180,7 +181,8 @@ export class SmbService {
     if (cacheDir.length === 0) {
       throw new Error('无法获取应用缓存目录');
     }
-    const result = this.bridge?.openFile?.(entry.path, cacheDir, entry.name) ?? '';
+    const maybeResult = this.bridge?.openFile?.(entry.path, cacheDir, entry.name);
+    const result = await Promise.resolve(maybeResult ?? '');
     if (result.length === 0) {
       throw new Error(this.getState().lastError || this.getCapability().blocker);
     }

@@ -1,10 +1,16 @@
 #include <node_api.h>
 
 #include <cstdint>
+#include <cstdarg>
+#include <cstdio>
+#include <atomic>
 #include <ctime>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if PLAYER_SIRIUS_HAS_LIBSMB2
@@ -59,6 +65,13 @@ SmbBridgeState g_smb_state;
 SmbSessionConfig g_smb_config;
 napi_env g_listener_env = nullptr;
 napi_ref g_listener_ref = nullptr;
+std::mutex g_smb_state_mutex;
+std::atomic<int32_t> g_smb_inflight_ops{0};
+std::atomic<uint64_t> g_smb_op_seq{0};
+std::atomic<bool> g_smb_release_pending{false};
+#if PLAYER_SIRIUS_HAS_LIBSMB2
+std::mutex g_smb_op_mutex;
+#endif
 #if PLAYER_SIRIUS_HAS_LIBSMB2
 ActiveSmbSession g_active_session;
 #endif
@@ -188,6 +201,25 @@ std::string SanitizeFileName(const std::string& name)
     return sanitized;
 }
 
+static uint64_t NowEpochMs()
+{
+    using namespace std::chrono;
+    return static_cast<uint64_t>(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
+}
+
+static void SmbLog(const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    std::fprintf(stderr, "[PlayerSirius][SMB][%llu][tid=%zu] ",
+        static_cast<unsigned long long>(NowEpochMs()),
+        std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    std::vfprintf(stderr, fmt, args);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+    va_end(args);
+}
+
 std::string BuildCachePath(const std::string& cache_dir, const std::string& suggested_name)
 {
     namespace fs = std::filesystem;
@@ -289,8 +321,12 @@ void DispatchEventToJs(const std::string& type, const std::string& message)
 
 void SetError(const std::string& message)
 {
-    g_smb_state.session_state = "error";
-    g_smb_state.last_error = message;
+    {
+        {
+        std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+        g_smb_state.session_state = "error";
+        g_smb_state.last_error = message;
+    }
     DispatchEventToJs("error", message);
 }
 
@@ -313,33 +349,59 @@ std::string GetLibError(smb2_context* context, const std::string& fallback)
     return message != nullptr && message[0] != '\0' ? std::string(message) : fallback;
 }
 
-bool EnsureConnected(std::string* error)
+struct SessionSnapshot {
+    std::string host;
+    int32_t port = 445;
+    std::string share;
+    std::string username;
+    std::string password;
+};
+
+bool ReadSessionSnapshot(SessionSnapshot* snapshot, std::string* error)
 {
+    if (snapshot == nullptr) {
+        if (error != nullptr) {
+            *error = "SMB snapshot is null";
+        }
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(g_smb_state_mutex);
     if (g_smb_config.host.empty() || g_smb_config.share.empty()) {
         if (error != nullptr) {
             *error = "SMB profile is not configured";
         }
         return false;
     }
-    if (g_smb_config.port != 445) {
+    snapshot->host = g_smb_config.host;
+    snapshot->port = g_smb_config.port;
+    snapshot->share = g_smb_config.share;
+    snapshot->username = g_smb_config.username;
+    snapshot->password = g_smb_config.password;
+    SmbLog("ReadSessionSnapshot host=%s port=%d share=%s user=%s",
+        snapshot->host.c_str(), snapshot->port, snapshot->share.c_str(), snapshot->username.c_str());
+    return true;
+}
+
+bool EnsureConnectedOnWorker(const SessionSnapshot& snapshot, std::string* error)
+{
+    if (snapshot.port != 445) {
         if (error != nullptr) {
             *error = "当前 libsmb2 bridge 仅支持 445 端口";
         }
         return false;
     }
     if (g_active_session.context != nullptr &&
-        g_active_session.host == g_smb_config.host &&
-        g_active_session.port == g_smb_config.port &&
-        g_active_session.share == g_smb_config.share &&
-        g_active_session.username == g_smb_config.username &&
-        g_active_session.password == g_smb_config.password) {
+        g_active_session.host == snapshot.host &&
+        g_active_session.port == snapshot.port &&
+        g_active_session.share == snapshot.share &&
+        g_active_session.username == snapshot.username &&
+        g_active_session.password == snapshot.password) {
         return true;
     }
 
+    SmbLog("EnsureConnectedOnWorker connect_share host=%s share=%s user=%s",
+        snapshot.host.c_str(), snapshot.share.c_str(), snapshot.username.c_str());
     ResetSession();
-    g_smb_state.session_state = "connecting";
-    g_smb_state.last_error.clear();
-    DispatchEventToJs("connecting", "Connecting to SMB share");
 
     smb2_context* context = smb2_init_context();
     if (context == nullptr) {
@@ -349,18 +411,18 @@ bool EnsureConnected(std::string* error)
         return false;
     }
 
-    if (!g_smb_config.username.empty()) {
-        smb2_set_user(context, g_smb_config.username.c_str());
+    if (!snapshot.username.empty()) {
+        smb2_set_user(context, snapshot.username.c_str());
     }
-    if (!g_smb_config.password.empty()) {
-        smb2_set_password(context, g_smb_config.password.c_str());
+    if (!snapshot.password.empty()) {
+        smb2_set_password(context, snapshot.password.c_str());
     }
 
     const int rc = smb2_connect_share(
         context,
-        g_smb_config.host.c_str(),
-        g_smb_config.share.c_str(),
-        g_smb_config.username.empty() ? nullptr : g_smb_config.username.c_str());
+        snapshot.host.c_str(),
+        snapshot.share.c_str(),
+        snapshot.username.empty() ? nullptr : snapshot.username.c_str());
     if (rc != 0) {
         const std::string message = GetLibError(context, "SMB connect_share failed");
         smb2_destroy_context(context);
@@ -371,13 +433,12 @@ bool EnsureConnected(std::string* error)
     }
 
     g_active_session.context = context;
-    g_active_session.host = g_smb_config.host;
-    g_active_session.port = g_smb_config.port;
-    g_active_session.share = g_smb_config.share;
-    g_active_session.username = g_smb_config.username;
-    g_active_session.password = g_smb_config.password;
-    g_smb_state.session_state = "connected";
-    DispatchEventToJs("connected", "SMB share connected");
+    g_active_session.host = snapshot.host;
+    g_active_session.port = snapshot.port;
+    g_active_session.share = snapshot.share;
+    g_active_session.username = snapshot.username;
+    g_active_session.password = snapshot.password;
+    SmbLog("EnsureConnectedOnWorker connected ok");
     return true;
 }
 
@@ -390,6 +451,36 @@ bool IsDirectoryEntry(const smb2dirent* entry)
 #endif
 }
 #endif
+
+napi_value CreateJsError(napi_env env, const std::string& message)
+{
+    napi_value msg = nullptr;
+    napi_value err = nullptr;
+    napi_create_string_utf8(env, message.c_str(), NAPI_AUTO_LENGTH, &msg);
+    napi_create_error(env, nullptr, msg, &err);
+    return err;
+}
+
+void MaybeApplyPendingRelease()
+{
+    if (!g_smb_release_pending.load()) {
+        return;
+    }
+    if (g_smb_inflight_ops.load() != 0) {
+        return;
+    }
+#if PLAYER_SIRIUS_HAS_LIBSMB2
+    ResetSession();
+#endif
+    {
+        std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+        g_smb_state = SmbBridgeState();
+        g_smb_config = SmbSessionConfig();
+    }
+    g_smb_release_pending.store(false);
+    SmbLog("release applied (reset session/state)");
+    DispatchEventToJs("released", "SMB session released");
+}
 
 napi_value GetCapability(napi_env env, napi_callback_info info)
 {
@@ -464,7 +555,6 @@ napi_value ConfigureProfile(napi_env env, napi_callback_info info)
         SetError("SMB path must be a string");
         return result;
     }
-
     if (host.empty() || share.empty()) {
         SetError("SMB host and share are required");
         return result;
@@ -479,60 +569,83 @@ napi_value ConfigureProfile(napi_env env, napi_callback_info info)
     }
 #endif
 
-    g_smb_config.profile_name = profile_name;
-    g_smb_config.host = host;
-    g_smb_config.port = port > 0 ? port : 445;
-    g_smb_config.share = share;
-    g_smb_config.username = username;
-    g_smb_config.password = password;
-    g_smb_config.path = path.empty() ? "/" : path;
+    SmbLog("configureProfile name=%s host=%s port=%d share=%s user=%s path=%s",
+        profile_name.c_str(), host.c_str(), port, share.c_str(), username.c_str(), path.c_str());
+    {
+        std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+        g_smb_config.profile_name = profile_name;
+        g_smb_config.host = host;
+        g_smb_config.port = port > 0 ? port : 445;
+        g_smb_config.share = share;
+        g_smb_config.username = username;
+        g_smb_config.password = password;
+        g_smb_config.path = path.empty() ? "/" : path;
 
-    g_smb_state.profile_name = g_smb_config.profile_name;
-    g_smb_state.host = g_smb_config.host;
-    g_smb_state.port = g_smb_config.port;
-    g_smb_state.share = g_smb_config.share;
-    g_smb_state.username = g_smb_config.username;
-    g_smb_state.path = g_smb_config.path;
-    g_smb_state.last_error.clear();
-    g_smb_state.session_state = "configured";
+        g_smb_state.profile_name = g_smb_config.profile_name;
+        g_smb_state.host = g_smb_config.host;
+        g_smb_state.port = g_smb_config.port;
+        g_smb_state.share = g_smb_config.share;
+        g_smb_state.username = g_smb_config.username;
+        g_smb_state.path = g_smb_config.path;
+        g_smb_state.last_error.clear();
+        g_smb_state.session_state = "configured";
+    }
     DispatchEventToJs("configured", "SMB profile configured");
     napi_create_int32(env, 0, &result);
     return result;
 }
 
-napi_value ListDirectory(napi_env env, napi_callback_info info)
+struct EntryData {
+    std::string name;
+    std::string path;
+    bool is_directory = false;
+    int64_t size = 0;
+    int64_t modified_at = 0;
+};
+
+struct ListDirectoryWork {
+    uint64_t op_id = 0;
+    napi_async_work work = nullptr;
+    napi_deferred deferred = nullptr;
+    std::string remote_path;
+    std::vector<EntryData> entries;
+    std::string error;
+};
+
+static void ExecuteListDirectory(napi_env env, void* data)
 {
-    napi_value result = nullptr;
-    napi_create_array_with_length(env, 0, &result);
-    if (g_smb_state.host.empty() || g_smb_state.share.empty()) {
-        SetError("SMB profile is not configured");
-        return result;
+    (void)env;
+    auto* work = static_cast<ListDirectoryWork*>(data);
+    if (work == nullptr) {
+        return;
     }
+
+    SmbLog("listDirectory execute begin op=%llu remotePath=/%s",
+        static_cast<unsigned long long>(work->op_id), work->remote_path.c_str());
+    const uint64_t start_ms = NowEpochMs();
+    g_smb_inflight_ops.fetch_add(1);
 
 #if !PLAYER_SIRIUS_HAS_LIBSMB2
-    g_smb_state.session_state = "blocked";
-    g_smb_state.last_error = kSmbBlocker;
-    DispatchEventToJs("blocked", kSmbBlocker);
-    return result;
+    work->error = kSmbBlocker;
 #else
-    std::string error;
-    if (!EnsureConnected(&error)) {
-        SetError(error);
-        return result;
+    std::lock_guard<std::mutex> op_lock(g_smb_op_mutex);
+    SessionSnapshot snapshot;
+    if (!ReadSessionSnapshot(&snapshot, &work->error)) {
+        g_smb_inflight_ops.fetch_sub(1);
+        return;
+    }
+    if (!EnsureConnectedOnWorker(snapshot, &work->error)) {
+        g_smb_inflight_ops.fetch_sub(1);
+        return;
     }
 
-    const std::string remote_path = NormalizeRemotePath(g_smb_state.path);
-    g_smb_state.session_state = "listing";
-    g_smb_state.last_error.clear();
-    DispatchEventToJs("listing", remote_path.empty() ? "/" : remote_path);
-
-    smb2dir* directory = smb2_opendir(g_active_session.context, remote_path.c_str());
+    smb2dir* directory = smb2_opendir(g_active_session.context, work->remote_path.c_str());
     if (directory == nullptr) {
-        SetError(GetLibError(g_active_session.context, "SMB opendir failed"));
-        return result;
+        work->error = GetLibError(g_active_session.context, "SMB opendir failed");
+        g_smb_inflight_ops.fetch_sub(1);
+        return;
     }
 
-    uint32_t index = 0;
     while (true) {
         smb2dirent* entry = smb2_readdir(g_active_session.context, directory);
         if (entry == nullptr) {
@@ -542,69 +655,171 @@ napi_value ListDirectory(napi_env env, napi_callback_info info)
         if (name.empty() || name == "." || name == "..") {
             continue;
         }
-        const bool is_directory = IsDirectoryEntry(entry);
-        const std::string full_path = "/" + JoinPath(remote_path, name);
-        const int64_t size = static_cast<int64_t>(entry->st.smb2_size);
-        const int64_t modified_at = static_cast<int64_t>(entry->st.smb2_mtime);
-        napi_set_element(env, result, index++, CreateEntryObject(env, name, full_path, is_directory, size, modified_at));
+        EntryData item;
+        item.name = name;
+        item.is_directory = IsDirectoryEntry(entry);
+        item.path = "/" + JoinPath(work->remote_path, name);
+        item.size = static_cast<int64_t>(entry->st.smb2_size);
+        item.modified_at = static_cast<int64_t>(entry->st.smb2_mtime);
+        work->entries.push_back(std::move(item));
     }
+
     smb2_closedir(g_active_session.context, directory);
-    g_smb_state.session_state = "listed";
-    DispatchEventToJs("listed", "SMB directory listed");
-    return result;
 #endif
+
+    g_smb_inflight_ops.fetch_sub(1);
+    SmbLog("listDirectory execute end op=%llu entries=%zu err=%s costMs=%llu",
+        static_cast<unsigned long long>(work->op_id), work->entries.size(),
+        work->error.empty() ? "" : work->error.c_str(),
+        static_cast<unsigned long long>(NowEpochMs() - start_ms));
 }
 
-napi_value OpenFile(napi_env env, napi_callback_info info)
+static void CompleteListDirectory(napi_env env, napi_status status, void* data)
 {
-    size_t argc = 3;
-    napi_value argv[3] = {nullptr, nullptr, nullptr};
-    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    auto* work = static_cast<ListDirectoryWork*>(data);
+    if (work == nullptr) {
+        return;
+    }
 
-    std::string path;
+    SmbLog("listDirectory complete op=%llu status=%d err=%s",
+        static_cast<unsigned long long>(work->op_id), static_cast<int>(status),
+        work->error.empty() ? "" : work->error.c_str());
+
+    if (status != napi_ok || !work->error.empty()) {
+#if !PLAYER_SIRIUS_HAS_LIBSMB2
+        {
+            std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+            g_smb_state.session_state = "blocked";
+            g_smb_state.last_error = kSmbBlocker;
+        }
+        DispatchEventToJs("blocked", kSmbBlocker);
+        napi_reject_deferred(env, work->deferred, CreateJsError(env, kSmbBlocker));
+#else
+        SetError(work->error.empty() ? "SMB listDirectory failed" : work->error);
+        napi_reject_deferred(env, work->deferred, CreateJsError(env, g_smb_state.last_error));
+#endif
+    } else {
+        napi_value result = nullptr;
+        napi_create_array_with_length(env, work->entries.size(), &result);
+        uint32_t index = 0;
+        for (const auto& item : work->entries) {
+            napi_set_element(env, result, index++,
+                CreateEntryObject(env, item.name, item.path, item.is_directory, item.size, item.modified_at));
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+            g_smb_state.session_state = "listed";
+            g_smb_state.last_error.clear();
+        }
+        DispatchEventToJs("listed", "SMB directory listed");
+        napi_resolve_deferred(env, work->deferred, result);
+    }
+
+    napi_delete_async_work(env, work->work);
+    delete work;
+    MaybeApplyPendingRelease();
+}
+
+napi_value ListDirectory(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    napi_value promise = nullptr;
+    napi_deferred deferred = nullptr;
+    napi_create_promise(env, &deferred, &promise);
+
+    std::string host;
+    std::string share;
+    std::string remote_path;
+    {
+        std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+        host = g_smb_state.host;
+        share = g_smb_state.share;
+        remote_path = NormalizeRemotePath(g_smb_state.path);
+        if (host.empty() || share.empty()) {
+            g_smb_state.session_state = "error";
+            g_smb_state.last_error = "SMB profile is not configured";
+        } else {
+            g_smb_state.session_state = "listing";
+            g_smb_state.last_error.clear();
+        }
+    }
+
+    if (host.empty() || share.empty()) {
+        DispatchEventToJs("error", "SMB profile is not configured");
+        napi_reject_deferred(env, deferred, CreateJsError(env, "SMB profile is not configured"));
+        return promise;
+    }
+
+    DispatchEventToJs("listing", remote_path.empty() ? "/" : remote_path);
+    SmbLog("listDirectory called remotePath=/%s", remote_path.c_str());
+
+    auto* work = new ListDirectoryWork();
+    work->op_id = g_smb_op_seq.fetch_add(1) + 1;
+    work->deferred = deferred;
+    work->remote_path = remote_path;
+    SmbLog("listDirectory queued op=%llu remotePath=/%s",
+        static_cast<unsigned long long>(work->op_id), work->remote_path.c_str());
+
+    napi_value resource_name = nullptr;
+    napi_create_string_utf8(env, "smb_list_directory", NAPI_AUTO_LENGTH, &resource_name);
+    napi_create_async_work(env, nullptr, resource_name, ExecuteListDirectory, CompleteListDirectory, work, &work->work);
+    napi_queue_async_work(env, work->work);
+    return promise;
+}
+
+struct OpenFileWork {
+    uint64_t op_id = 0;
+    napi_async_work work = nullptr;
+    napi_deferred deferred = nullptr;
+    std::string remote_path;
     std::string cache_dir;
     std::string suggested_name;
-    napi_value result = nullptr;
-    napi_create_string_utf8(env, "", NAPI_AUTO_LENGTH, &result);
-    if (argc < 3 ||
-        !ReadOptionalStringArg(env, argv[0], &path) ||
-        !ReadOptionalStringArg(env, argv[1], &cache_dir) ||
-        !ReadOptionalStringArg(env, argv[2], &suggested_name) ||
-        path.empty() || cache_dir.empty()) {
-        SetError("SMB target path and cache directory are required");
-        return result;
+    std::string local_path;
+    std::string result_uri;
+    std::string error;
+};
+
+static void ExecuteOpenFile(napi_env env, void* data)
+{
+    (void)env;
+    auto* work = static_cast<OpenFileWork*>(data);
+    if (work == nullptr) {
+        return;
     }
-    g_smb_state.path = path;
+
+    SmbLog("openFile execute begin op=%llu remotePath=/%s",
+        static_cast<unsigned long long>(work->op_id), work->remote_path.c_str());
+    const uint64_t start_ms = NowEpochMs();
+    g_smb_inflight_ops.fetch_add(1);
 
 #if !PLAYER_SIRIUS_HAS_LIBSMB2
-    g_smb_state.session_state = "blocked";
-    g_smb_state.last_error = kSmbBlocker;
-    DispatchEventToJs("blocked", kSmbBlocker);
-    return result;
+    work->error = kSmbBlocker;
 #else
-    std::string error;
-    if (!EnsureConnected(&error)) {
-        SetError(error);
-        return result;
+    std::lock_guard<std::mutex> op_lock(g_smb_op_mutex);
+    SessionSnapshot snapshot;
+    if (!ReadSessionSnapshot(&snapshot, &work->error)) {
+        g_smb_inflight_ops.fetch_sub(1);
+        return;
+    }
+    if (!EnsureConnectedOnWorker(snapshot, &work->error)) {
+        g_smb_inflight_ops.fetch_sub(1);
+        return;
     }
 
-    const std::string remote_path = NormalizeRemotePath(path);
-    const std::string local_path = BuildCachePath(cache_dir, suggested_name);
-    g_smb_state.session_state = "downloading";
-    g_smb_state.last_error.clear();
-    DispatchEventToJs("downloading", remote_path);
-
-    smb2fh* handle = smb2_open(g_active_session.context, remote_path.c_str(), O_RDONLY);
+    work->local_path = BuildCachePath(work->cache_dir, work->suggested_name);
+    smb2fh* handle = smb2_open(g_active_session.context, work->remote_path.c_str(), O_RDONLY);
     if (handle == nullptr) {
-        SetError(GetLibError(g_active_session.context, "SMB open failed"));
-        return result;
+        work->error = GetLibError(g_active_session.context, "SMB open failed");
+        g_smb_inflight_ops.fetch_sub(1);
+        return;
     }
 
-    std::ofstream output(local_path, std::ios::binary | std::ios::trunc);
+    std::ofstream output(work->local_path, std::ios::binary | std::ios::trunc);
     if (!output.is_open()) {
         smb2_close(g_active_session.context, handle);
-        SetError("Failed to create SMB cache file");
-        return result;
+        work->error = "Failed to create SMB cache file";
+        g_smb_inflight_ops.fetch_sub(1);
+        return;
     }
 
     std::vector<uint8_t> buffer(64 * 1024, 0);
@@ -614,9 +829,10 @@ napi_value OpenFile(napi_env env, napi_callback_info info)
             output.close();
             smb2_close(g_active_session.context, handle);
             std::error_code ec;
-            std::filesystem::remove(local_path, ec);
-            SetError(GetLibError(g_active_session.context, "SMB read failed"));
-            return result;
+            std::filesystem::remove(work->local_path, ec);
+            work->error = GetLibError(g_active_session.context, "SMB read failed");
+            g_smb_inflight_ops.fetch_sub(1);
+            return;
         }
         if (bytes_read == 0) {
             break;
@@ -626,29 +842,122 @@ napi_value OpenFile(napi_env env, napi_callback_info info)
             output.close();
             smb2_close(g_active_session.context, handle);
             std::error_code ec;
-            std::filesystem::remove(local_path, ec);
-            SetError("Failed to write SMB cache file");
-            return result;
+            std::filesystem::remove(work->local_path, ec);
+            work->error = "Failed to write SMB cache file";
+            g_smb_inflight_ops.fetch_sub(1);
+            return;
         }
     }
 
     output.close();
     smb2_close(g_active_session.context, handle);
-    g_smb_state.session_state = "downloaded";
-    DispatchEventToJs("downloaded", local_path);
-    napi_create_string_utf8(env, std::string("file://" + local_path).c_str(), NAPI_AUTO_LENGTH, &result);
-    return result;
+    work->result_uri = "file://" + work->local_path;
 #endif
+
+    g_smb_inflight_ops.fetch_sub(1);
+    SmbLog("openFile execute end op=%llu localPath=%s err=%s costMs=%llu",
+        static_cast<unsigned long long>(work->op_id),
+        work->local_path.c_str(),
+        work->error.empty() ? "" : work->error.c_str(),
+        static_cast<unsigned long long>(NowEpochMs() - start_ms));
+}
+
+static void CompleteOpenFile(napi_env env, napi_status status, void* data)
+{
+    auto* work = static_cast<OpenFileWork*>(data);
+    if (work == nullptr) {
+        return;
+    }
+
+    SmbLog("openFile complete op=%llu status=%d err=%s",
+        static_cast<unsigned long long>(work->op_id), static_cast<int>(status),
+        work->error.empty() ? "" : work->error.c_str());
+
+    if (status != napi_ok || !work->error.empty()) {
+#if !PLAYER_SIRIUS_HAS_LIBSMB2
+        {
+            std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+            g_smb_state.session_state = "blocked";
+            g_smb_state.last_error = kSmbBlocker;
+        }
+        DispatchEventToJs("blocked", kSmbBlocker);
+        napi_reject_deferred(env, work->deferred, CreateJsError(env, kSmbBlocker));
+#else
+        SetError(work->error.empty() ? "SMB openFile failed" : work->error);
+        napi_reject_deferred(env, work->deferred, CreateJsError(env, g_smb_state.last_error));
+#endif
+    } else {
+        {
+            std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+            g_smb_state.session_state = "downloaded";
+            g_smb_state.last_error.clear();
+        }
+        DispatchEventToJs("downloaded", work->local_path);
+        napi_value js_result = nullptr;
+        napi_create_string_utf8(env, work->result_uri.c_str(), NAPI_AUTO_LENGTH, &js_result);
+        napi_resolve_deferred(env, work->deferred, js_result);
+    }
+
+    napi_delete_async_work(env, work->work);
+    delete work;
+    MaybeApplyPendingRelease();
+}
+
+napi_value OpenFile(napi_env env, napi_callback_info info)
+{
+    size_t argc = 3;
+    napi_value argv[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+
+    napi_value promise = nullptr;
+    napi_deferred deferred = nullptr;
+    napi_create_promise(env, &deferred, &promise);
+
+    std::string path;
+    std::string cache_dir;
+    std::string suggested_name;
+    if (argc < 3 ||
+        !ReadOptionalStringArg(env, argv[0], &path) ||
+        !ReadOptionalStringArg(env, argv[1], &cache_dir) ||
+        !ReadOptionalStringArg(env, argv[2], &suggested_name) ||
+        path.empty() || cache_dir.empty()) {
+        SetError("SMB target path and cache directory are required");
+        napi_reject_deferred(env, deferred, CreateJsError(env, g_smb_state.last_error));
+        return promise;
+    }
+
+    const std::string remote_path = NormalizeRemotePath(path);
+    {
+        std::lock_guard<std::mutex> lock(g_smb_state_mutex);
+        g_smb_state.session_state = "downloading";
+        g_smb_state.last_error.clear();
+    }
+    DispatchEventToJs("downloading", remote_path);
+    SmbLog("openFile called remotePath=/%s", remote_path.c_str());
+
+    auto* work = new OpenFileWork();
+    work->op_id = g_smb_op_seq.fetch_add(1) + 1;
+    work->deferred = deferred;
+    work->remote_path = remote_path;
+    work->cache_dir = cache_dir;
+    work->suggested_name = suggested_name;
+    SmbLog("openFile queued op=%llu remotePath=/%s cacheDir=%s name=%s",
+        static_cast<unsigned long long>(work->op_id), work->remote_path.c_str(),
+        work->cache_dir.c_str(), work->suggested_name.c_str());
+
+    napi_value resource_name = nullptr;
+    napi_create_string_utf8(env, "smb_open_file", NAPI_AUTO_LENGTH, &resource_name);
+    napi_create_async_work(env, nullptr, resource_name, ExecuteOpenFile, CompleteOpenFile, work, &work->work);
+    napi_queue_async_work(env, work->work);
+    return promise;
 }
 
 napi_value Release(napi_env env, napi_callback_info info)
 {
-#if PLAYER_SIRIUS_HAS_LIBSMB2
-    ResetSession();
-#endif
-    g_smb_state = SmbBridgeState();
-    g_smb_config = SmbSessionConfig();
-    DispatchEventToJs("released", "SMB session released");
+    (void)info;
+    SmbLog("release requested inflight=%d", g_smb_inflight_ops.load());
+    g_smb_release_pending.store(true);
+    MaybeApplyPendingRelease();
     napi_value undefined = nullptr;
     napi_get_undefined(env, &undefined);
     return undefined;
@@ -672,4 +981,5 @@ napi_value Init(napi_env env, napi_value exports)
 
 } // namespace
 
-NAPI_MODULE(NODE_GYP_MODULE_NAME, Init)
+// Export under a stable name so ArkTS side can `requireNapi('smb_client_bridge')` without extra build defines.
+NAPI_MODULE(smb_client_bridge, Init)

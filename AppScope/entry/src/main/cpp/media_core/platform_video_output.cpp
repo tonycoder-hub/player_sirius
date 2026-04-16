@@ -72,6 +72,9 @@ public:
         int fence_fd = -1;
         const int32_t request_rc = OH_NativeWindow_NativeWindowRequestBuffer(window_, &native_buffer, &fence_fd);
         if (request_rc != 0 || native_buffer == nullptr) {
+            if (fence_fd >= 0) {
+                close(fence_fd);
+            }
             if (error != nullptr) {
                 *error = "OH_NativeWindow_NativeWindowRequestBuffer failed";
             }
@@ -80,14 +83,20 @@ public:
 
         BufferHandle* handle = OH_NativeWindow_GetBufferHandleFromNative(native_buffer);
         if (handle == nullptr) {
+            if (fence_fd >= 0) {
+                close(fence_fd);
+            }
             if (error != nullptr) {
                 *error = "OH_NativeWindow_GetBufferHandleFromNative failed";
             }
             return false;
         }
 
-        void* mapped = mmap(handle->virAddr, handle->size, PROT_READ | PROT_WRITE, MAP_SHARED, handle->fd, 0);
+        void* mapped = mmap(nullptr, handle->size, PROT_READ | PROT_WRITE, MAP_SHARED, handle->fd, 0);
         if (mapped == MAP_FAILED || mapped == nullptr) {
+            if (fence_fd >= 0) {
+                close(fence_fd);
+            }
             if (error != nullptr) {
                 *error = "mmap native window buffer failed";
             }
@@ -106,6 +115,9 @@ public:
         Region region {nullptr, 0};
         const int32_t flush_rc = OH_NativeWindow_NativeWindowFlushBuffer(window_, native_buffer, fence_fd, region);
         if (flush_rc != 0) {
+            if (fence_fd >= 0) {
+                close(fence_fd);
+            }
             if (error != nullptr) {
                 *error = "OH_NativeWindow_NativeWindowFlushBuffer failed";
             }

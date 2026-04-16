@@ -157,6 +157,9 @@ struct Index {
   private dlnaPollTimer: number = -1;
   private attemptedKernelModes: string[] = [];
   private fallbackInProgress: boolean = false;
+  private cleanupChain: Promise<void> = Promise.resolve();
+  private cleanupSeq: number = 0;
+  private cleanupInFlight: number = 0;
 
   aboutToAppear(): void {
     this.bindAVPlayerListeners();
@@ -167,22 +170,55 @@ struct Index {
     this.startStallMonitor();
     this.initWindowBrightness();
   }
-
   aboutToDisappear(): void {
+    console.info(`[PlayerSirius][Index][lifecycle] aboutToDisappear currentMode=${this.playerKernelMode} policy=${this.kernelSelectionPolicy} prepared=${this.isPrepared} playing=${this.isPlaying}`);
     this.persistCurrentItem();
-    this.avPlayerService.release();
-    this.backgroundPlaybackService.ensureStopped();
-    this.nativePlayerBridgeService.release();
-    this.nativePlayerBridgeService.clearEventListener();
-    this.smbService.release();
-    this.smbService.clearEventListener();
-    this.localMediaHttpServerService.stop();
     this.stopStallMonitor();
     this.stopDlnaPolling();
-    this.restoreSystemBrightness();
-    this.setPreferredOrientation(window.Orientation.PORTRAIT);
-  }
+    this.nativePlayerBridgeService.clearEventListener();
+    this.smbService.clearEventListener();
 
+    void this.enqueueCleanup(async () => {
+      console.info(`[PlayerSirius][Index][cleanup] lifecycle task begin`);
+      await this.backgroundPlaybackService.ensureStopped();
+      await this.avPlayerService.release();
+      this.nativePlayerBridgeService.release();
+      this.smbService.release();
+      await this.localMediaHttpServerService.stop();
+      await this.restoreSystemBrightness();
+      this.setPreferredOrientation(window.Orientation.PORTRAIT);
+      console.info(`[PlayerSirius][Index][cleanup] lifecycle task end`);
+    });
+  }
+  private enqueueCleanup(task: () => Promise<void>): Promise<void> {
+    const id = ++this.cleanupSeq;
+    const queuedAt = Date.now();
+    console.info(`[PlayerSirius][Index][cleanup] queued id=${id} inFlight=${this.cleanupInFlight} mode=${this.playerKernelMode}`);
+
+    const next = this.cleanupChain
+      .catch(() => {})
+      .then(async () => {
+        const startAt = Date.now();
+        this.cleanupInFlight++;
+        console.info(`[PlayerSirius][Index][cleanup] begin id=${id} queuedMs=${startAt - queuedAt} inFlight=${this.cleanupInFlight}`);
+        try {
+          await task();
+          console.info(`[PlayerSirius][Index][cleanup] end id=${id} costMs=${Date.now() - startAt}`);
+        } catch (err) {
+          console.error(`[PlayerSirius][Index][cleanup] fail id=${id} costMs=${Date.now() - startAt} err=${err}`);
+        } finally {
+          this.cleanupInFlight--;
+          console.info(`[PlayerSirius][Index][cleanup] settle id=${id} inFlight=${this.cleanupInFlight}`);
+        }
+      });
+
+    this.cleanupChain = next;
+    return next;
+  }
+      });
+    this.cleanupChain = next;
+    return next;
+  }
   private syncPlayerState(): void {
     this.currentMediaItem = this.playerService.getCurrentItem();
     this.currentSpeed = this.playerService.getSpeed();
@@ -545,7 +581,7 @@ struct Index {
       const toKernel = this.playerKernelService.getKernelByMode(fallbackMode).displayName;
       this.attemptedKernelModes.push(fallbackMode);
       this.currentMediaItem.lastPosition = this.currentTime;
-      this.stopCurrentPlaybackForSwitch();
+      await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
       this.playerKernelMode = fallbackMode;
       this.resetPlaybackFlags();
       this.resetAudioTracks();
@@ -761,10 +797,13 @@ struct Index {
 
     if (hintType === audio.InterruptHint.INTERRUPT_HINT_STOP) {
       this.wasPlayingBeforeInterrupt = false;
-      this.avPlayerService.stop();
+      void this.enqueueCleanup(async () => {
+      console.info(`[PlayerSirius][Index][cleanup] lifecycle task begin`);
+        await this.avPlayerService.stop();
+        await this.backgroundPlaybackService.ensureStopped();
+      });
       this.isPlaying = false;
       this.gestureHint = '音频被系统打断：已停止';
-      this.backgroundPlaybackService.ensureStopped();
       return;
     }
 
@@ -1470,13 +1509,14 @@ struct Index {
   }
 
   private async switchKernel(mode: string): Promise<void> {
+    console.info(`[PlayerSirius][Index][kernel] switch request target=${mode} current=${this.playerKernelMode} policy=${this.kernelSelectionPolicy}`);
     if (mode === 'auto') {
       this.kernelSelectionPolicy = 'auto';
       if (this.currentMediaItem) {
         const desiredMode = this.getDesiredKernelModeForItem(this.currentMediaItem);
         if (desiredMode !== this.playerKernelMode) {
           this.persistCurrentItem();
-          this.stopCurrentPlaybackForSwitch();
+          await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
           this.initializeKernelAttempt(this.currentMediaItem);
           this.resetPlaybackFlags();
           this.resetAudioTracks();
@@ -1494,7 +1534,7 @@ struct Index {
     }
 
     this.persistCurrentItem();
-    this.stopCurrentPlaybackForSwitch();
+    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
     this.kernelSelectionPolicy = 'manual';
     this.playerKernelMode = mode;
     this.attemptedKernelModes = [mode];
@@ -1548,20 +1588,22 @@ struct Index {
     this.playbackStartAtMs = Date.now();
     this.lastPlaybackProgressAtMs = Date.now();
   }
-
-  private stopCurrentPlaybackForSwitch(): void {
+  private async stopCurrentPlaybackForSwitch(): Promise<void> {
+    const startAt = Date.now();
+    console.info(`[PlayerSirius][Index][cleanup] stopCurrentPlaybackForSwitch begin mode=${this.playerKernelMode} prepared=${this.isPrepared} playing=${this.isPlaying}`);
     if (this.isUsingNativePlayer()) {
       this.nativePlayerBridgeService.stop();
       this.refreshNativeBridgeSummary();
     } else if (this.isUsingAVPlayer()) {
-      this.avPlayerService.stop();
+      await this.avPlayerService.stop();
     } else if (this.currentMediaItem && this.isPrepared) {
       this.videoController.stop();
     }
-    this.backgroundPlaybackService.ensureStopped();
+    await this.backgroundPlaybackService.ensureStopped();
     this.isPlaying = false;
     this.isPrepared = false;
     this.isLoading = false;
+    console.info(`[PlayerSirius][Index][cleanup] stopCurrentPlaybackForSwitch end costMs=${Date.now() - startAt}`);
   }
 
   private handlePlaybackFailure(message: string): void {
@@ -1627,7 +1669,7 @@ struct Index {
 
   private async requestOpenItem(item: MediaItem): Promise<void> {
     this.persistCurrentItem();
-    this.stopCurrentPlaybackForSwitch();
+    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
 
     if (this.shouldPromptResume(item)) {
       this.pendingOpenItem = { ...item };
@@ -1843,7 +1885,7 @@ struct Index {
 
   private async playFromPlaylist(index: number): Promise<void> {
     this.persistCurrentItem();
-    this.stopCurrentPlaybackForSwitch();
+    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
     const item = this.playerService.selectByIndex(index);
     await this.activatePlaylistItem(item);
     this.showPlaylist = false;
@@ -1851,13 +1893,13 @@ struct Index {
 
   private async playNext(): Promise<void> {
     this.persistCurrentItem();
-    this.stopCurrentPlaybackForSwitch();
+    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
     await this.activatePlaylistItem(this.playerService.playNext());
   }
 
   private async playPrevious(): Promise<void> {
     this.persistCurrentItem();
-    this.stopCurrentPlaybackForSwitch();
+    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
     await this.activatePlaylistItem(this.playerService.playPrevious());
   }
 

@@ -15,7 +15,14 @@ NativePlayerCore::NativePlayerCore()
     snapshot_.metrics = backend_->GetMetrics();
 }
 
-NativePlayerCore::~NativePlayerCore() = default;
+NativePlayerCore::~NativePlayerCore()
+{
+    // Ensure no background thread keeps running past addon teardown.
+    StopRuntimeMonitor();
+    if (backend_) {
+        backend_->Release();
+    }
+}
 
 Capability NativePlayerCore::GetCapability() const
 {
@@ -202,6 +209,11 @@ void NativePlayerCore::StartRuntimeMonitor()
 {
     if (runtime_monitor_running_.load()) {
         return;
+    }
+    // If the previous monitor loop exited naturally, its std::thread is still joinable.
+    // Re-assigning a joinable std::thread triggers std::terminate.
+    if (runtime_monitor_thread_.joinable()) {
+        runtime_monitor_thread_.join();
     }
     runtime_monitor_stop_requested_.store(false);
     runtime_monitor_running_.store(true);
