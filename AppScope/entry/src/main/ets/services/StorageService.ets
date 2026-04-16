@@ -125,6 +125,23 @@ export class StorageService {
     };
   }
 
+  private createPersistableSmbProfile(profile: SmbConnectionProfile): SmbConnectionProfile {
+    return {
+      ...profile,
+      password: ''
+    };
+  }
+
+  private toStatableLocalPath(uri: string): string | null {
+    if (uri.startsWith('/')) {
+      return uri;
+    }
+    if (uri.startsWith('file:///')) {
+      return decodeURIComponent(uri.slice('file://'.length));
+    }
+    return null;
+  }
+
   private upsertItems(items: MediaItem[], incoming: MediaItem, sortByLastPlayed: boolean): MediaItem[] {
     const nextItems = [...items];
     const existingIndex = nextItems.findIndex((item: MediaItem) => item.uri === incoming.uri);
@@ -241,8 +258,12 @@ export class StorageService {
         if (item.sourceType !== 'local') {
           return true;
         }
+        const statablePath = this.toStatableLocalPath(item.uri);
+        if (!statablePath) {
+          return true;
+        }
         try {
-          fs.statSync(item.uri);
+          fs.statSync(statablePath);
           return true;
         } catch {
           return false;
@@ -265,7 +286,9 @@ export class StorageService {
       const prefs = await this.getPreferences();
       const rawValue = await prefs.get(KEY_SMB_PROFILES, '[]');
       const parsed = JSON.parse(rawValue as string) as Partial<SmbConnectionProfile>[];
-      return parsed.map((profile: Partial<SmbConnectionProfile>) => this.createDefaultSmbProfile(profile));
+      return parsed.map((profile: Partial<SmbConnectionProfile>) =>
+        this.createPersistableSmbProfile(this.createDefaultSmbProfile(profile))
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : JSON.stringify(err);
       console.error(`Get SMB profiles failed: ${message}`);
@@ -277,15 +300,16 @@ export class StorageService {
     try {
       const existing = await this.getSmbProfiles();
       const next = [...existing];
-      const normalized = this.createDefaultSmbProfile(profile);
+      const normalized = this.createPersistableSmbProfile(this.createDefaultSmbProfile(profile));
       const index = next.findIndex((item: SmbConnectionProfile) => item.id === normalized.id);
       if (index >= 0) {
         next[index] = normalized;
       } else {
         next.unshift(normalized);
       }
+      const persistable = next.map((item: SmbConnectionProfile) => this.createPersistableSmbProfile(item));
       const prefs = await this.getPreferences();
-      await prefs.put(KEY_SMB_PROFILES, JSON.stringify(next.slice(0, 10)));
+      await prefs.put(KEY_SMB_PROFILES, JSON.stringify(persistable.slice(0, 10)));
       await prefs.flush();
     } catch (err) {
       const message = err instanceof Error ? err.message : JSON.stringify(err);

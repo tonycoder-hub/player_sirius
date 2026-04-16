@@ -322,7 +322,6 @@ void DispatchEventToJs(const std::string& type, const std::string& message)
 void SetError(const std::string& message)
 {
     {
-        {
         std::lock_guard<std::mutex> lock(g_smb_state_mutex);
         g_smb_state.session_state = "error";
         g_smb_state.last_error = message;
