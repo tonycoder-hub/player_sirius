@@ -62,6 +62,8 @@ interface NativePlayerBridge {
   release?: () => void;
 }
 
+declare function requireNapi(name: string): NativePlayerBridge;
+
 export class NativePlayerBridgeService {
   private bridge: NativePlayerBridge | null = null;
 
@@ -147,10 +149,7 @@ export class NativePlayerBridgeService {
 
   private tryLoadBridge(): NativePlayerBridge | null {
     try {
-      const maybeLoader = (globalThis as Record<string, (name: string) => NativePlayerBridge>).requireNapi;
-      if (typeof maybeLoader === 'function') {
-        return maybeLoader('native_player_bridge');
-      }
+      return requireNapi('native_player_bridge');
     } catch (err) {
       console.warn(`Native bridge unavailable: ${err}`);
     }

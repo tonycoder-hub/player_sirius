@@ -1,5 +1,6 @@
 import { socket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
+import url from '@ohos.url';
 
 export interface DlnaDevice {
   usn: string;
@@ -23,6 +24,20 @@ interface SsdpResponse {
   location: string;
   st: string;
 }
+
+interface FetchResponse {
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+}
+
+interface FetchRequestOptions {
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+declare function fetch(requestUrl: string, options?: FetchRequestOptions): Promise<FetchResponse>;
 
 export class DlnaService {
   static async discoverDevices(timeoutMs: number = 3000): Promise<DlnaDevice[]> {
@@ -185,7 +200,7 @@ export class DlnaService {
   }
 
   static async getPlaybackStatus(device: DlnaDevice): Promise<DlnaPlaybackStatus> {
-    const [transportXml, positionXml, volumeXml] = await Promise.all([
+    const responses = await Promise.all([
       DlnaService.soap(device.avTransportControlUrl,
         'urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo',
         `<?xml version="1.0" encoding="utf-8"?>` +
@@ -224,6 +239,9 @@ export class DlnaService {
         : Promise.resolve('')
     ]);
 
+    const transportXml = responses[0];
+    const positionXml = responses[1];
+    const volumeXml = responses[2];
     return {
       transportState: DlnaService.extractTag(transportXml, 'CurrentTransportState') || 'UNKNOWN',
       currentUri: DlnaService.extractTag(positionXml, 'TrackURI'),
@@ -317,7 +335,7 @@ export class DlnaService {
 
   private static resolveUrl(baseUrl: string, maybeRelative: string): string {
     try {
-      return new URL(maybeRelative, baseUrl).toString();
+      return new url.URL(maybeRelative, baseUrl).toString();
     } catch {
       return maybeRelative;
     }

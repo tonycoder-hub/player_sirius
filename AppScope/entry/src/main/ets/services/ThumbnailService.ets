@@ -13,7 +13,7 @@ export class ThumbnailService {
       return item.thumbnailUri;
     }
 
-    const cacheDir = (context as unknown as { cacheDir?: string }).cacheDir ?? (context as unknown as { filesDir?: string }).filesDir ?? '';
+    const cacheDir = context.cacheDir ?? context.filesDir ?? '';
     if (cacheDir.length === 0) {
       return '';
     }

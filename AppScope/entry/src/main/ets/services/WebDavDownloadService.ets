@@ -2,6 +2,19 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import type { common } from '@kit.AbilityKit';
 
+interface FetchRequestOptions {
+  method: string;
+  headers: Record<string, string>;
+}
+
+interface FetchResponse {
+  ok: boolean;
+  status: number;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+
+declare function fetch(requestUrl: string, options: FetchRequestOptions): Promise<FetchResponse>;
+
 export class WebDavDownloadService {
   static async downloadToCache(
     context: common.UIAbilityContext,
@@ -11,7 +24,7 @@ export class WebDavDownloadService {
     password?: string
   ): Promise<string> {
     const safeName = WebDavDownloadService.sanitizeFileName(suggestedName);
-    const cacheDir = (context as unknown as { cacheDir?: string }).cacheDir ?? (context as unknown as { filesDir?: string }).filesDir ?? '';
+    const cacheDir = context.cacheDir ?? context.filesDir ?? '';
     if (cacheDir.length === 0) {
       throw new Error('无法获取应用缓存目录');
     }
@@ -28,7 +41,7 @@ export class WebDavDownloadService {
       headers['Authorization'] = `Basic ${token}`;
     }
 
-    let res: Response;
+    let res: FetchResponse;
     try {
       res = await fetch(fileUrl, { method: 'GET', headers });
     } catch (err) {

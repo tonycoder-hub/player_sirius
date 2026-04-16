@@ -4,6 +4,7 @@ import { common } from '@kit.AbilityKit';
 import { media } from '@kit.MediaKit';
 import window from '@ohos.window';
 import audio from '@ohos.multimedia.audio';
+import url from '@ohos.url';
 import type { AVPlayerListener, AVPlayerTrackSummary } from '../services/AVPlayerService';
 import { PlayerService, PLAYBACK_SPEEDS } from '../services/PlayerService';
 import { PlayerKernelService } from '../services/PlayerKernelService';
@@ -215,10 +216,6 @@ struct Index {
     this.cleanupChain = next;
     return next;
   }
-      });
-    this.cleanupChain = next;
-    return next;
-  }
   private syncPlayerState(): void {
     this.currentMediaItem = this.playerService.getCurrentItem();
     this.currentSpeed = this.playerService.getSpeed();
@@ -360,10 +357,10 @@ struct Index {
 
     const merged = this.findExistingMedia(this.currentMediaItem.uri);
     if (merged) {
-      Object.assign(this.currentMediaItem, merged, {
-        lastPosition: this.currentTime,
-        duration: this.duration > 0 ? this.duration : merged.duration
-      });
+      const next = this.cloneMediaItem(merged);
+      next.lastPosition = this.currentTime;
+      next.duration = this.duration > 0 ? this.duration : merged.duration;
+      this.currentMediaItem = next;
     }
   }
 
@@ -432,7 +429,7 @@ struct Index {
     }
     if (item.uri.startsWith('http://') || item.uri.startsWith('https://')) {
       try {
-        const parsed = new URL(item.uri);
+        const parsed = new url.URL(item.uri);
         return `${parsed.protocol.replace(':', '').toUpperCase()} · ${parsed.host}`;
       } catch {
         return '网络流';
@@ -455,12 +452,12 @@ struct Index {
       this.gestureHint = '当前没有可刷新的媒体';
       return;
     }
-    const item = { ...this.currentMediaItem };
+    const item = this.cloneMediaItem(this.currentMediaItem);
     try {
       if (item.sourceType === 'local') {
         try {
           const stat = fs.statSync(item.uri);
-          item.fileSizeBytes = Number((stat as Record<string, number>).size ?? item.fileSizeBytes ?? 0);
+          item.fileSizeBytes = Number(stat.size ?? item.fileSizeBytes ?? 0);
         } catch {
           // ignore local stat failures and keep existing data
         }
@@ -660,10 +657,10 @@ struct Index {
       onError: (message: string) => {
         this.handlePlaybackFailureWithRecovery(message);
       },
-      onAudioInterrupt: (event: unknown) => {
-        this.handleAudioInterrupt(event);
+      onAudioInterrupt: (_eventType: number, hintType: number) => {
+        this.handleAudioInterrupt(hintType);
       },
-      onBufferingUpdate: (infoType: unknown, value: number) => {
+      onBufferingUpdate: (infoType: number, value: number) => {
         this.handleBufferingUpdate(infoType, value);
       },
       onStartRenderFrame: () => {
@@ -681,17 +678,14 @@ struct Index {
     this.avPlayerService.setListener(listener);
   }
 
-  private handleBufferingUpdate(infoType: unknown, value: number): void {
-    const type = Number(infoType);
-    const bufferingInfoType = media.BufferingInfoType as unknown as Record<string, number>;
-
-    if (type === bufferingInfoType.BUFFERING_START) {
+  private handleBufferingUpdate(infoType: number, value: number): void {
+    if (infoType === media.BufferingInfoType.BUFFERING_START) {
       this.isBuffering = true;
       this.weakNetHint = '正在缓冲...';
       return;
     }
 
-    if (type === bufferingInfoType.BUFFERING_END) {
+    if (infoType === media.BufferingInfoType.BUFFERING_END) {
       this.isBuffering = false;
       if (this.weakNetHint === '正在缓冲...') {
         this.weakNetHint = '';
@@ -699,12 +693,12 @@ struct Index {
       return;
     }
 
-    if (type === bufferingInfoType.BUFFERING_PERCENT) {
+    if (infoType === media.BufferingInfoType.BUFFERING_PERCENT) {
       this.bufferPercent = Math.max(0, Math.min(Math.floor(value), 100));
       return;
     }
 
-    if (type === bufferingInfoType.CACHED_DURATION) {
+    if (infoType === media.BufferingInfoType.CACHED_DURATION) {
       this.cachedDurationSeconds = Math.max(0, Math.floor(value / 1000));
     }
   }
@@ -715,7 +709,7 @@ struct Index {
     }
     this.stallMonitorTimer = setInterval(() => {
       this.checkWeakNetStall();
-    }, 2000) as unknown as number;
+    }, 2000);
   }
 
   private stopStallMonitor(): void {
@@ -765,14 +759,7 @@ struct Index {
     return true;
   }
 
-  private handleAudioInterrupt(event: unknown): void {
-    // Refer to Audio focus guide: interruptEvent.forceType + interruptEvent.hintType. Keep logic tolerant to API variations.
-    const interruptEvent = event as unknown as {
-      forceType?: number;
-      hintType?: number;
-    };
-    const hintType = interruptEvent?.hintType;
-
+  private handleAudioInterrupt(hintType: number): void {
     if (hintType === audio.InterruptHint.INTERRUPT_HINT_PAUSE) {
       this.wasPlayingBeforeInterrupt = this.isPlaying;
       if (this.isPlaying) {
@@ -1222,8 +1209,8 @@ struct Index {
 
   private setWebDavPathFromHref(href: string): void {
     try {
-      const base = new URL(this.webDavBaseUrl.trim());
-      const entry = new URL(href);
+      const base = new url.URL(this.webDavBaseUrl.trim());
+      const entry = new url.URL(href);
       const basePath = base.pathname.replace(/\/+$/, '');
       const entryPath = entry.pathname;
       let relative = entryPath.startsWith(basePath) ? entryPath.slice(basePath.length) : entryPath;
@@ -1631,22 +1618,39 @@ struct Index {
   private findExistingMedia(uri: string): MediaItem | null {
     const libraryMatch = this.libraryItems.find((item: MediaItem) => item.uri === uri);
     if (libraryMatch) {
-      return { ...libraryMatch };
+      return this.cloneMediaItem(libraryMatch);
     }
 
     const historyMatch = this.historyItems.find((item: MediaItem) => item.uri === uri);
     if (historyMatch) {
-      return { ...historyMatch };
+      return this.cloneMediaItem(historyMatch);
     }
 
     return null;
+  }
+
+  private cloneMediaItem(item: MediaItem): MediaItem {
+    return MediaItemHelper.createWithOptions(item.uri, item.title, item);
   }
 
   private createPlayableItem(uri: string, title?: string): MediaItem {
     const existing = this.findExistingMedia(uri);
     if (existing) {
       return {
-        ...existing,
+        id: existing.id,
+        uri: existing.uri,
+        duration: existing.duration,
+        lastPosition: existing.lastPosition,
+        addedTime: existing.addedTime,
+        isFavorite: existing.isFavorite,
+        lastPlayedAt: existing.lastPlayedAt,
+        playCount: existing.playCount,
+        isCompleted: existing.isCompleted,
+        thumbnailUri: existing.thumbnailUri,
+        width: existing.width,
+        height: existing.height,
+        fileSizeBytes: existing.fileSizeBytes,
+        importRootUri: existing.importRootUri,
         title: title && title.length > 0 ? title : existing.title,
         sourceType: MediaItemHelper.isNetworkUri(uri) ? 'network' : existing.sourceType,
         folderName: MediaItemHelper.isNetworkUri(uri) ? '网络流' : existing.folderName
@@ -1672,7 +1676,7 @@ struct Index {
     await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
 
     if (this.shouldPromptResume(item)) {
-      this.pendingOpenItem = { ...item };
+      this.pendingOpenItem = this.cloneMediaItem(item);
       this.showResumePrompt = true;
       return;
     }
@@ -1681,12 +1685,11 @@ struct Index {
   }
 
   private async applyOpenItem(item: MediaItem, resumeFromHistory: boolean): Promise<void> {
-    const playable = this.playerService.addOrActivate({
-      ...item,
-      lastPosition: resumeFromHistory ? item.lastPosition : 0,
-      isCompleted: false,
-      lastPlayedAt: Date.now()
-    });
+    const next = this.cloneMediaItem(item);
+    next.lastPosition = resumeFromHistory ? item.lastPosition : 0;
+    next.isCompleted = false;
+    next.lastPlayedAt = Date.now();
+    const playable = this.playerService.addOrActivate(next);
     this.currentMediaItem = playable;
     this.currentTime = playable.lastPosition;
     this.duration = playable.duration;
@@ -2126,7 +2129,7 @@ struct Index {
   build() {
     Column() {
       if (this.currentMediaItem) {
-        Stack({ alignContent: Alignment.BottomCenter }) {
+        Stack({ alignContent: Alignment.Bottom }) {
           if (this.isUsingAVPlayer() || this.isUsingNativePlayer()) {
             XComponent({
               id: 'player_sirius_surface',
@@ -2142,7 +2145,7 @@ struct Index {
           } else {
             ForEach([this.videoSessionKey], (_sessionKey: number) => {
               Video({
-                src: this.currentMediaItem.uri,
+                src: this.currentMediaItem?.uri ?? '',
                 currentProgressRate: this.currentSpeed,
                 previewUri: '',
                 controller: this.videoController
@@ -2154,7 +2157,8 @@ struct Index {
                 .muted(this.playerVolume <= 0)
                 .objectFit(this.getObjectFitMode())
                 .rotate({ angle: this.videoRotation })
-                .onPrepared((duration: number) => {
+                .onPrepared((info: PreparedInfo) => {
+                  const duration = info.duration;
                   this.duration = duration;
                   this.isPrepared = true;
                   this.isLoading = false;
@@ -2168,7 +2172,8 @@ struct Index {
                   }
                   this.maybeUpdateBackgroundSession();
                 })
-                .onUpdate((time: number) => {
+                .onUpdate((info: PlaybackInfo) => {
+                  const time = info.time;
                   if (!this.isDraggingProgress) {
                     this.currentTime = time;
                     this.syncCurrentItemProgress();
@@ -3049,8 +3054,6 @@ struct Index {
 
   @Builder
   LibraryBuilder() {
-    const visibleItems = this.getVisibleLibraryItems();
-
     Column() {
       Text('媒体库')
         .fontSize(18)
@@ -3136,13 +3139,13 @@ struct Index {
         .margin({ bottom: 12 });
       }
 
-      if (visibleItems.length === 0) {
+      if (this.getVisibleLibraryItems().length === 0) {
         Text('当前视图暂无媒体')
           .fontSize(16)
           .fontColor(Color.Gray);
       } else {
         List({ space: 8 }) {
-          ForEach(visibleItems, (item: MediaItem) => {
+          ForEach(this.getVisibleLibraryItems(), (item: MediaItem) => {
             ListItem() {
               Row() {
                 if (item.thumbnailUri && item.thumbnailUri.length > 0) {

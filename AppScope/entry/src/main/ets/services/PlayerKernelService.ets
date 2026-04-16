@@ -127,10 +127,41 @@ export class PlayerKernelService {
   }
 
   supportsFeature(feature: keyof PlaybackFeatureFlags): boolean {
-    return this.currentKernel.featureFlags[feature];
+    return this.getFeatureValue(this.currentKernel.featureFlags, feature);
   }
 
   supportsFeatureByMode(mode: string, feature: keyof PlaybackFeatureFlags): boolean {
-    return this.getKernelByMode(mode).featureFlags[feature];
+    return this.getFeatureValue(this.getKernelByMode(mode).featureFlags, feature);
+  }
+
+  private getFeatureValue(flags: PlaybackFeatureFlags, feature: keyof PlaybackFeatureFlags): boolean {
+    switch (feature) {
+      case 'networkPlayback':
+        return flags.networkPlayback;
+      case 'hlsPlayback':
+        return flags.hlsPlayback;
+      case 'externalSubtitle':
+        return flags.externalSubtitle;
+      case 'subtitleOffset':
+        return flags.subtitleOffset;
+      case 'multiAudioTrack':
+        return flags.multiAudioTrack;
+      case 'backgroundPlayback':
+        return flags.backgroundPlayback;
+      case 'audioFocus':
+        return flags.audioFocus;
+      case 'smb':
+        return flags.smb;
+      case 'webdav':
+        return flags.webdav;
+      case 'ftp':
+        return flags.ftp;
+      case 'casting':
+        return flags.casting;
+      case 'equalizer':
+        return flags.equalizer;
+      default:
+        return false;
+    }
   }
 }

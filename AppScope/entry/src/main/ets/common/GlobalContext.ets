@@ -18,58 +18,58 @@ export class GlobalContext {
   private static _smbService: SmbService | null = null;
 
   static getAVPlayerService(): AVPlayerService {
-    if (!this._avPlayerService) {
-      this._avPlayerService = new AVPlayerService();
+    if (!GlobalContext._avPlayerService) {
+      GlobalContext._avPlayerService = new AVPlayerService();
     }
-    return this._avPlayerService;
+    return GlobalContext._avPlayerService;
   }
 
   static getPlayerService(): PlayerService {
-    if (!this._playerService) {
-      this._playerService = new PlayerService();
+    if (!GlobalContext._playerService) {
+      GlobalContext._playerService = new PlayerService();
     }
-    return this._playerService;
+    return GlobalContext._playerService;
   }
 
   static getStorageService(): StorageService {
-    if (!this._storageService) {
-      this._storageService = new StorageService();
+    if (!GlobalContext._storageService) {
+      GlobalContext._storageService = new StorageService();
     }
-    return this._storageService;
+    return GlobalContext._storageService;
   }
 
   static getPlayerKernelService(): PlayerKernelService {
-    if (!this._playerKernelService) {
-      this._playerKernelService = new PlayerKernelService();
+    if (!GlobalContext._playerKernelService) {
+      GlobalContext._playerKernelService = new PlayerKernelService();
     }
-    return this._playerKernelService;
+    return GlobalContext._playerKernelService;
   }
 
   static getBackgroundPlaybackService(): BackgroundPlaybackService {
-    if (!this._backgroundPlaybackService) {
-      this._backgroundPlaybackService = new BackgroundPlaybackService();
+    if (!GlobalContext._backgroundPlaybackService) {
+      GlobalContext._backgroundPlaybackService = new BackgroundPlaybackService();
     }
-    return this._backgroundPlaybackService;
+    return GlobalContext._backgroundPlaybackService;
   }
 
   static getNativePlayerBridgeService(): NativePlayerBridgeService {
-    if (!this._nativePlayerBridgeService) {
-      this._nativePlayerBridgeService = new NativePlayerBridgeService();
+    if (!GlobalContext._nativePlayerBridgeService) {
+      GlobalContext._nativePlayerBridgeService = new NativePlayerBridgeService();
     }
-    return this._nativePlayerBridgeService;
+    return GlobalContext._nativePlayerBridgeService;
   }
 
   static getLocalMediaHttpServerService(): LocalMediaHttpServerService {
-    if (!this._localMediaHttpServerService) {
-      this._localMediaHttpServerService = new LocalMediaHttpServerService();
+    if (!GlobalContext._localMediaHttpServerService) {
+      GlobalContext._localMediaHttpServerService = new LocalMediaHttpServerService();
     }
-    return this._localMediaHttpServerService;
+    return GlobalContext._localMediaHttpServerService;
   }
 
   static getSmbService(): SmbService {
-    if (!this._smbService) {
-      this._smbService = new SmbService();
+    if (!GlobalContext._smbService) {
+      GlobalContext._smbService = new SmbService();
     }
-    return this._smbService;
+    return GlobalContext._smbService;
   }
 }

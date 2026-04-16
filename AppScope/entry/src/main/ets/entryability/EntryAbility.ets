@@ -2,7 +2,6 @@ import UIAbility from '@ohos.app.ability.UIAbility';
 import window from '@ohos.window';
 import type AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import type Want from '@ohos.app.ability.Want';
-import type { common } from '@kit.AbilityKit';
 import { GlobalContext } from '../common/GlobalContext';
 
 export default class EntryAbility extends UIAbility {
@@ -16,8 +15,8 @@ export default class EntryAbility extends UIAbility {
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     GlobalContext.getStorageService().setContext(this.context);
-    GlobalContext.getBackgroundPlaybackService().setContext(this.context as unknown as common.UIAbilityContext);
-    GlobalContext.getSmbService().setContext(this.context as unknown as common.UIAbilityContext);
+    GlobalContext.getBackgroundPlaybackService().setContext(this.context);
+    GlobalContext.getSmbService().setContext(this.context);
   }
 
   onDestroy(): void {

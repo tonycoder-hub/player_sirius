@@ -1,5 +1,6 @@
 import { BusinessError } from '@kit.BasicServicesKit';
 import { media } from '@kit.MediaKit';
+import audio from '@ohos.multimedia.audio';
 
 export interface AVPlayerListener {
   onPrepared?: (durationSeconds: number) => void;
@@ -9,8 +10,8 @@ export interface AVPlayerListener {
   onPause?: () => void;
   onCompletion?: () => void;
   onError?: (message: string) => void;
-  onAudioInterrupt?: (event: unknown) => void;
-  onBufferingUpdate?: (infoType: unknown, value: number) => void;
+  onAudioInterrupt?: (eventType: number, hintType: number) => void;
+  onBufferingUpdate?: (infoType: number, value: number) => void;
   onStartRenderFrame?: () => void;
   onAvailableBitrates?: (bitrates: number[]) => void;
 }
@@ -143,47 +144,25 @@ export class AVPlayerService {
 
   async getAudioTracks(): Promise<AVPlayerTrackSummary[]> {
     const player = await this.ensurePlayer();
-    const getTracksCapablePlayer = player as media.AVPlayer & {
-      getTrackDescription?: () => Promise<Array<media.MediaDescription>>;
-    };
-    if (!getTracksCapablePlayer.getTrackDescription) {
-      return [];
-    }
 
     try {
-      const descriptions = await getTracksCapablePlayer.getTrackDescription();
+      const descriptions = await player.getTrackDescription();
       const result: AVPlayerTrackSummary[] = [];
       let audioOrdinal = 0;
 
       for (const desc of descriptions) {
-        const anyDesc = desc as unknown as Record<string | number, unknown>;
-        const trackType = anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
-          .MD_KEY_TRACK_TYPE as unknown as string] ?? anyDesc['trackType'];
-        const isAudio = trackType === (media as unknown as { TrackType: Record<string, unknown> }).TrackType.AUDIO
-          || trackType === 'audio';
-        if (!isAudio) {
+        const trackType = this.getDescriptionNumber(desc, media.MediaDescriptionKey.MD_KEY_TRACK_TYPE);
+        if (trackType !== media.MediaType.MEDIA_TYPE_AUD) {
           continue;
         }
 
-        const trackIndex = Number(
-          anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
-            .MD_KEY_TRACK_INDEX as unknown as string] ?? anyDesc['trackIndex']
-        );
+        const trackIndex = this.getDescriptionNumber(desc, media.MediaDescriptionKey.MD_KEY_TRACK_INDEX);
         if (!Number.isFinite(trackIndex)) {
           continue;
         }
 
-        const language = String(
-          anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
-            .MD_KEY_LANGUAGE as unknown as string] ?? anyDesc['language'] ?? ''
-        );
-        const codec = String(
-          anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
-            .MD_KEY_CODEC_MIME as unknown as string]
-          ?? anyDesc[(media as unknown as { MediaDescriptionKey: Record<string, unknown> }).MediaDescriptionKey
-            .MD_KEY_CODEC_NAME as unknown as string]
-          ?? anyDesc['codec'] ?? ''
-        );
+        const language = this.getDescriptionString(desc, media.MediaDescriptionKey.MD_KEY_LANGUAGE);
+        const codec = this.getDescriptionString(desc, media.MediaDescriptionKey.MD_KEY_CODEC_MIME);
 
         audioOrdinal += 1;
         const label = language.length > 0 ? `音轨 ${audioOrdinal} (${language})` : `音轨 ${audioOrdinal}`;
@@ -192,7 +171,6 @@ export class AVPlayerService {
 
       return result;
     } catch (err) {
-      // Calling getTrackDescription() before prepared may throw; treat as "no tracks yet".
       return [];
     }
   }
@@ -202,15 +180,8 @@ export class AVPlayerService {
       return;
     }
 
-    const trackCapablePlayer = this.avPlayer as media.AVPlayer & {
-      selectTrack?: (trackIndex: number) => Promise<void> | void;
-    };
-    if (!trackCapablePlayer.selectTrack) {
-      return;
-    }
-
     try {
-      await trackCapablePlayer.selectTrack(trackIndex);
+      await this.avPlayer.selectTrack(trackIndex);
     } catch (err) {
       const error = err as BusinessError;
       console.error(`AVPlayer selectTrack failed: ${error.code}, ${error.message}`);
@@ -222,15 +193,8 @@ export class AVPlayerService {
       return;
     }
 
-    const trackCapablePlayer = this.avPlayer as media.AVPlayer & {
-      deselectTrack?: (trackIndex: number) => Promise<void> | void;
-    };
-    if (!trackCapablePlayer.deselectTrack) {
-      return;
-    }
-
     try {
-      await trackCapablePlayer.deselectTrack(trackIndex);
+      await this.avPlayer.deselectTrack(trackIndex);
     } catch (err) {
       const error = err as BusinessError;
       console.error(`AVPlayer deselectTrack failed: ${error.code}, ${error.message}`);
@@ -316,11 +280,11 @@ export class AVPlayerService {
       this.listener?.onError?.('AVPlayer 播放失败。');
     });
 
-    player.on('audioInterrupt', (event: unknown) => {
-      this.listener?.onAudioInterrupt?.(event);
+    player.on('audioInterrupt', (event: audio.InterruptEvent) => {
+      this.listener?.onAudioInterrupt?.(event.eventType, event.hintType);
     });
 
-    player.on('bufferingUpdate', (infoType: unknown, value: number) => {
+    player.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
       this.listener?.onBufferingUpdate?.(infoType, value);
     });
 
@@ -341,15 +305,8 @@ export class AVPlayerService {
   }
 
   private async applyVolume(player: media.AVPlayer): Promise<void> {
-    const volumeCapablePlayer = player as media.AVPlayer & {
-      setVolume?: (volume: number) => Promise<void> | void;
-    };
-    if (!volumeCapablePlayer.setVolume) {
-      return;
-    }
-
     try {
-      await volumeCapablePlayer.setVolume(this.currentVolume);
+      await player.setVolume(this.currentVolume);
     } catch (err) {
       const error = err as BusinessError;
       console.error(`AVPlayer setVolume failed: ${error.code}, ${error.message}`);
@@ -357,18 +314,23 @@ export class AVPlayerService {
   }
 
   private async applySpeed(player: media.AVPlayer): Promise<void> {
-    const speedCapablePlayer = player as media.AVPlayer & {
-      setSpeed?: (speed: number) => Promise<void> | void;
-    };
-    if (!speedCapablePlayer.setSpeed) {
-      return;
-    }
-
     try {
-      await speedCapablePlayer.setSpeed(this.currentSpeed);
+      await player.setSpeed(this.currentSpeed);
     } catch (err) {
       const error = err as BusinessError;
       console.error(`AVPlayer setSpeed failed: ${error.code}, ${error.message}`);
     }
+  }
+
+  private getDescriptionNumber(desc: media.MediaDescription, key: media.MediaDescriptionKey): number {
+    return Number(desc[key]);
+  }
+
+  private getDescriptionString(desc: media.MediaDescription, key: media.MediaDescriptionKey): string {
+    const value = desc[key];
+    if (!value) {
+      return '';
+    }
+    return String(value);
   }
 }

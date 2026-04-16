@@ -45,6 +45,8 @@ export interface SmbBridgeEvent extends SmbBridgeState {
 
 type SmbBridgeEventListener = (event: SmbBridgeEvent) => void;
 
+declare function requireNapi(name: string): SmbNativeBridge;
+
 interface SmbNativeBridge {
   getCapability?: () => SmbCapability;
   getState?: () => SmbBridgeState;
@@ -175,9 +177,7 @@ export class SmbService {
     if (configured !== 0) {
       throw new Error(this.getState().lastError || this.getCapability().blocker);
     }
-    const cacheDir = (this.context as unknown as { cacheDir?: string })?.cacheDir
-      ?? (this.context as unknown as { filesDir?: string })?.filesDir
-      ?? '';
+    const cacheDir = this.context?.cacheDir ?? this.context?.filesDir ?? '';
     if (cacheDir.length === 0) {
       throw new Error('无法获取应用缓存目录');
     }
@@ -214,10 +214,7 @@ export class SmbService {
 
   private tryLoadBridge(): SmbNativeBridge | null {
     try {
-      const maybeLoader = (globalThis as Record<string, (name: string) => SmbNativeBridge>).requireNapi;
-      if (typeof maybeLoader === 'function') {
-        return maybeLoader('smb_client_bridge');
-      }
+      return requireNapi('smb_client_bridge');
     } catch (err) {
       console.warn(`SMB native bridge unavailable: ${err}`);
     }

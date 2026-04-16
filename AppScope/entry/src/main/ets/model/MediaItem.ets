@@ -21,14 +21,14 @@ export interface MediaItem {
 export class MediaItemHelper {
   static create(uri: string, title: string = '未知视频'): MediaItem {
     return {
-      id: this.generateId(),
+      id: MediaItemHelper.generateId(),
       uri,
       title,
       duration: 0,
       lastPosition: 0,
       addedTime: Date.now(),
-      sourceType: this.isNetworkUri(uri) ? 'network' : 'local',
-      folderName: this.getFolderName(uri),
+      sourceType: MediaItemHelper.isNetworkUri(uri) ? 'network' : 'local',
+      folderName: MediaItemHelper.getFolderName(uri),
       isFavorite: false,
       lastPlayedAt: Date.now(),
       playCount: 0,
@@ -37,12 +37,11 @@ export class MediaItemHelper {
   }
 
   static createWithOptions(uri: string, title: string, options?: Partial<MediaItem>): MediaItem {
-    return {
-      ...this.create(uri, title),
-      ...options,
-      uri,
-      title
-    };
+    const base = MediaItemHelper.create(uri, title);
+    if (!options) {
+      return base;
+    }
+    return MediaItemHelper.merge(base, options, uri, title);
   }
 
   static isNetworkUri(uri: string): boolean {
@@ -50,7 +49,7 @@ export class MediaItemHelper {
   }
 
   static getFolderName(uri: string): string {
-    if (this.isNetworkUri(uri)) {
+    if (MediaItemHelper.isNetworkUri(uri)) {
       return '网络流';
     }
 
@@ -73,5 +72,27 @@ export class MediaItemHelper {
 
   private static generateId(): string {
     return `${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+  }
+
+  private static merge(base: MediaItem, options: Partial<MediaItem>, uri: string, title: string): MediaItem {
+    return {
+      id: options.id ?? base.id,
+      uri,
+      title,
+      duration: options.duration ?? base.duration,
+      lastPosition: options.lastPosition ?? base.lastPosition,
+      addedTime: options.addedTime ?? base.addedTime,
+      sourceType: options.sourceType ?? base.sourceType,
+      folderName: options.folderName ?? base.folderName,
+      isFavorite: options.isFavorite ?? base.isFavorite,
+      lastPlayedAt: options.lastPlayedAt ?? base.lastPlayedAt,
+      playCount: options.playCount ?? base.playCount,
+      isCompleted: options.isCompleted ?? base.isCompleted,
+      thumbnailUri: options.thumbnailUri ?? base.thumbnailUri,
+      width: options.width ?? base.width,
+      height: options.height ?? base.height,
+      fileSizeBytes: options.fileSizeBytes ?? base.fileSizeBytes,
+      importRootUri: options.importRootUri ?? base.importRootUri
+    };
   }
 }

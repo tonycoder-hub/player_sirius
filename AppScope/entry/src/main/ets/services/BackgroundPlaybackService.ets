@@ -1,12 +1,13 @@
 import { BusinessError } from '@kit.BasicServicesKit';
-import { wantAgent, type common } from '@kit.AbilityKit';
+import { wantAgent } from '@kit.AbilityKit';
+import type { common } from '@kit.AbilityKit';
 import { backgroundTaskManager } from '@kit.BackgroundTasksKit';
 import { avSession } from '@kit.AVSessionKit';
 import type { MediaItem } from '../model/MediaItem';
 
 export class BackgroundPlaybackService {
   private context: common.UIAbilityContext | null = null;
-  private session: any | null = null;
+  private session: avSession.AVSession | null = null;
   private running: boolean = false;
   private readonly sessionTag: string = 'PLAYER_SIRIUS_SESSION';
 
@@ -34,7 +35,7 @@ export class BackgroundPlaybackService {
     }
 
     try {
-      const metadata = {
+      const metadata: avSession.AVMetadata = {
         assetId: currentItem.id,
         title: currentItem.title,
         duration: Math.max(0, Math.floor(durationSeconds * 1000)),
@@ -42,8 +43,8 @@ export class BackgroundPlaybackService {
       };
       await this.session.setAVMetadata(metadata);
 
-      const playbackState = {
-        state: isPlaying ? (avSession as any).PlaybackState?.PLAYBACK_STATE_PLAY : (avSession as any).PlaybackState?.PLAYBACK_STATE_PAUSE,
+      const playbackState: avSession.AVPlaybackState = {
+        state: isPlaying ? avSession.PlaybackState.PLAYBACK_STATE_PLAY : avSession.PlaybackState.PLAYBACK_STATE_PAUSE,
         speed: 1.0,
         position: {
           elapsedTime: Math.max(0, Math.floor(positionSeconds * 1000)),
@@ -58,16 +59,16 @@ export class BackgroundPlaybackService {
   }
 
   private async ensureSession(currentItem: MediaItem, durationSeconds: number, positionSeconds: number, isPlaying: boolean): Promise<void> {
-    if (!this.context || this.session) {
-      if (this.session) {
-        await this.updateSessionState(currentItem, durationSeconds, positionSeconds, isPlaying);
-      }
+    if (!this.context) {
+      return;
+    }
+    if (this.session) {
+      await this.updateSessionState(currentItem, durationSeconds, positionSeconds, isPlaying);
       return;
     }
 
     try {
-      // Use 'video' session for a video player (also works for audio tracks in video).
-      this.session = await (avSession as any).createAVSession(this.context, this.sessionTag, 'video');
+      this.session = await avSession.createAVSession(this.context, this.sessionTag, 'video');
       await this.session.activate();
       await this.updateSessionState(currentItem, durationSeconds, positionSeconds, isPlaying);
     } catch (err) {
@@ -107,8 +108,11 @@ export class BackgroundPlaybackService {
         wantAgentFlags: [wantAgent.WantAgentFlags.UPDATE_PRESENT_FLAG]
       };
       const agent = await wantAgent.getWantAgent(wantAgentInfo);
-      const mode = (backgroundTaskManager as any).BackgroundMode?.AUDIO_PLAYBACK ?? 'audioPlayback';
-      await (backgroundTaskManager as any).startBackgroundRunning(this.context, mode, agent);
+      await backgroundTaskManager.startBackgroundRunning(
+        this.context,
+        backgroundTaskManager.BackgroundMode.AUDIO_PLAYBACK,
+        agent
+      );
       this.running = true;
     } catch (err) {
       const error = err as BusinessError;
@@ -122,7 +126,7 @@ export class BackgroundPlaybackService {
       return;
     }
     try {
-      await (backgroundTaskManager as any).stopBackgroundRunning(this.context);
+      await backgroundTaskManager.stopBackgroundRunning(this.context);
     } catch {
       // ignore
     } finally {

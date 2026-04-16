@@ -12,11 +12,23 @@ export class PlayerService {
     if (existingIndex >= 0) {
       this.playlist.setCurrentIndex(existingIndex);
       const currentItem = this.playlist.getCurrentItem() as MediaItem;
-      Object.assign(currentItem, {
-        ...item,
-        id: currentItem.id || item.id,
-        addedTime: currentItem.addedTime || item.addedTime
-      });
+      currentItem.uri = item.uri;
+      currentItem.title = item.title;
+      currentItem.duration = item.duration;
+      currentItem.lastPosition = item.lastPosition;
+      currentItem.sourceType = item.sourceType;
+      currentItem.folderName = item.folderName;
+      currentItem.isFavorite = item.isFavorite;
+      currentItem.lastPlayedAt = item.lastPlayedAt;
+      currentItem.playCount = item.playCount;
+      currentItem.isCompleted = item.isCompleted;
+      currentItem.thumbnailUri = item.thumbnailUri;
+      currentItem.width = item.width;
+      currentItem.height = item.height;
+      currentItem.fileSizeBytes = item.fileSizeBytes;
+      currentItem.importRootUri = item.importRootUri;
+      currentItem.id = currentItem.id || item.id;
+      currentItem.addedTime = currentItem.addedTime || item.addedTime;
       return currentItem;
     }
 

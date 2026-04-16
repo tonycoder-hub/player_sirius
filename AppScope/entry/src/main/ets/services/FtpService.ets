@@ -16,6 +16,16 @@ interface FtpReply {
   message: string;
 }
 
+interface FtpReplyHandlers {
+  resolve: (r: FtpReply) => void;
+  reject: (e: Error) => void;
+}
+
+interface FtpPassiveEndpoint {
+  host: string;
+  port: number;
+}
+
 export class FtpService {
   static async listDirectory(
     host: string,
@@ -55,7 +65,7 @@ export class FtpService {
     remotePath: string,
     suggestedName: string
   ): Promise<string> {
-    const cacheDir = (context as unknown as { cacheDir?: string }).cacheDir ?? (context as unknown as { filesDir?: string }).filesDir ?? '';
+    const cacheDir = context.cacheDir ?? context.filesDir ?? '';
     if (cacheDir.length === 0) {
       throw new Error('无法获取应用缓存目录');
     }
@@ -108,10 +118,7 @@ class FtpClient {
   private readonly port: number;
   private tcp: socket.TCPSocket | null = null;
   private recvText: string = '';
-  private currentReply: {
-    resolve: (r: FtpReply) => void;
-    reject: (e: Error) => void;
-  } | null = null;
+  private currentReply: FtpReplyHandlers | null = null;
 
   private multilineCode: number | null = null;
   private multilineLines: string[] = [];
@@ -330,12 +337,12 @@ class FtpClient {
     if (!this.currentReply) {
       return;
     }
-    const { resolve } = this.currentReply;
+    const resolve = this.currentReply.resolve;
     this.currentReply = null;
     resolve(reply);
   }
 
-  private async enterPassiveMode(): Promise<{ host: string; port: number }> {
+  private async enterPassiveMode(): Promise<FtpPassiveEndpoint> {
     const reply = await this.command('PASV');
     if (reply.code !== 227) {
       throw new Error(`FTP PASV 失败：${reply.code} ${reply.message}`);

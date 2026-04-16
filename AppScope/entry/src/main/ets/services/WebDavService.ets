@@ -1,3 +1,5 @@
+import url from '@ohos.url';
+
 export interface WebDavEntry {
   href: string;
   name: string;
@@ -5,11 +7,25 @@ export interface WebDavEntry {
   sizeBytes: number;
 }
 
+interface FetchRequestOptions {
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+interface FetchResponse {
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+}
+
+declare function fetch(requestUrl: string, options: FetchRequestOptions): Promise<FetchResponse>;
+
 export class WebDavService {
   static async listDirectory(baseUrl: string, path: string, username?: string, password?: string): Promise<WebDavEntry[]> {
     const normalizedBase = baseUrl.trim().replace(/\/+$/, '');
     const normalizedPath = WebDavService.normalizePath(path);
-    const url = `${normalizedBase}${normalizedPath}`;
+    const requestUrl = `${normalizedBase}${normalizedPath}`;
 
     const headers: Record<string, string> = {
       'Depth': '1',
@@ -30,7 +46,7 @@ export class WebDavService {
       `</d:prop>` +
       `</d:propfind>`;
 
-    const res = await fetch(url, {
+    const res = await fetch(requestUrl, {
       method: 'PROPFIND',
       headers,
       body
@@ -41,7 +57,7 @@ export class WebDavService {
     }
 
     const xml = await res.text();
-    const entries = WebDavService.parseMultiStatus(xml, url);
+    const entries = WebDavService.parseMultiStatus(xml, requestUrl);
 
     // Exclude the directory itself if present.
     const selfHrefCandidates = new Set<string>([
@@ -51,7 +67,7 @@ export class WebDavService {
 
     const filtered = entries.filter((e: WebDavEntry) => {
       try {
-        const u = new URL(e.href);
+        const u = new url.URL(e.href);
         return !selfHrefCandidates.has(u.pathname);
       } catch {
         return true;
@@ -121,7 +137,7 @@ export class WebDavService {
 
   private static toAbsoluteHref(href: string, requestUrl: string): string {
     try {
-      return new URL(href, requestUrl).toString();
+      return new url.URL(href, requestUrl).toString();
     } catch {
       return href;
     }
@@ -129,7 +145,7 @@ export class WebDavService {
 
   private static basenameFromHref(href: string): string {
     try {
-      const u = new URL(href);
+      const u = new url.URL(href);
       const path = u.pathname.endsWith('/') ? u.pathname.slice(0, -1) : u.pathname;
       const segments = path.split('/').filter(Boolean);
       return segments.length > 0 ? decodeURIComponent(segments[segments.length - 1]) : href;

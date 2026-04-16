@@ -241,10 +241,9 @@ export class LocalMediaHttpServerService {
     try {
       const netHandle = connection.getDefaultNetSync();
       const properties = connection.getConnectionPropertiesSync(netHandle);
-      const linkAddresses = (properties as unknown as { linkAddresses?: Array<Record<string, unknown>> }).linkAddresses ?? [];
+      const linkAddresses = properties.linkAddresses;
       for (const item of linkAddresses) {
-        const addressWrapper = item['address'] as Record<string, unknown> | undefined;
-        const address = String(addressWrapper?.['address'] ?? '');
+        const address = item.address.address;
         if (/^\d+\.\d+\.\d+\.\d+$/.test(address) && address !== '127.0.0.1') {
           return address;
         }

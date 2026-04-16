@@ -29,7 +29,7 @@ export class StorageService {
       } catch (err) {
         const error = err as BusinessError;
         console.error(`Get preferences failed: ${error.code}, ${error.message}`);
-        throw error;
+        throw new Error(error.message);
       }
     }
     if (!this.prefs) {
@@ -62,16 +62,22 @@ export class StorageService {
 
   private mergeMediaItem(current: MediaItem, incoming: MediaItem): MediaItem {
     return this.createDefaultMediaItem({
-      ...current,
-      ...incoming,
       id: current.id || incoming.id,
       uri: incoming.uri || current.uri,
       title: incoming.title || current.title,
+      duration: incoming.duration || current.duration,
+      lastPosition: incoming.lastPosition || current.lastPosition,
       addedTime: current.addedTime || incoming.addedTime,
+      sourceType: incoming.sourceType || current.sourceType,
+      folderName: incoming.folderName || current.folderName,
       isFavorite: incoming.isFavorite ?? current.isFavorite,
       lastPlayedAt: Math.max(current.lastPlayedAt ?? 0, incoming.lastPlayedAt ?? 0),
       playCount: Math.max(current.playCount ?? 0, incoming.playCount ?? 0),
       isCompleted: incoming.isCompleted ?? current.isCompleted,
+      thumbnailUri: incoming.thumbnailUri || current.thumbnailUri,
+      width: incoming.width || current.width,
+      height: incoming.height || current.height,
+      fileSizeBytes: incoming.fileSizeBytes || current.fileSizeBytes,
       importRootUri: incoming.importRootUri || current.importRootUri
     });
   }
@@ -127,8 +133,14 @@ export class StorageService {
 
   private createPersistableSmbProfile(profile: SmbConnectionProfile): SmbConnectionProfile {
     return {
-      ...profile,
-      password: ''
+      id: profile.id,
+      name: profile.name,
+      host: profile.host,
+      port: profile.port,
+      share: profile.share,
+      username: profile.username,
+      password: '',
+      path: profile.path
     };
   }
 
@@ -355,8 +367,23 @@ export class StorageService {
   async savePlayHistory(item: MediaItem): Promise<void> {
     try {
       const nextItem = this.createDefaultMediaItem({
-        ...item,
-        lastPlayedAt: item.lastPlayedAt > 0 ? item.lastPlayedAt : Date.now()
+        id: item.id,
+        uri: item.uri,
+        title: item.title,
+        duration: item.duration,
+        lastPosition: item.lastPosition,
+        addedTime: item.addedTime,
+        sourceType: item.sourceType,
+        folderName: item.folderName,
+        isFavorite: item.isFavorite,
+        lastPlayedAt: item.lastPlayedAt > 0 ? item.lastPlayedAt : Date.now(),
+        playCount: item.playCount,
+        isCompleted: item.isCompleted,
+        thumbnailUri: item.thumbnailUri,
+        width: item.width,
+        height: item.height,
+        fileSizeBytes: item.fileSizeBytes,
+        importRootUri: item.importRootUri
       });
       const history = await this.readItems(KEY_HISTORY);
       const mergedHistory = this.upsertItems(history, nextItem, true).slice(0, MAX_HISTORY_SIZE);
