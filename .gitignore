@@ -1,0 +1,7 @@
+.hvigor/
+hvigor/
+build/
+AppScope/entry/build/
+local.properties
+.idea/workspace.xml
+.idea/.deveco/cxx/

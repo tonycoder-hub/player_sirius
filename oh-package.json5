@@ -7,7 +7,6 @@
   "license": "",
   "dependencies": {},
   "devDependencies": {
-    "@ohos/hvigor": "latest",
-    "@ohos/hvigor-ohos-plugin": "latest"
-  }
+  },
+  "modelVersion": "6.0.2"
 }
