@@ -1,3 +1,8 @@
 {
-  "apiType": "stageMode"
+  "apiType": "stageMode",
+  "targets": [
+    {
+      "name": "default"
+    }
+  ]
 }

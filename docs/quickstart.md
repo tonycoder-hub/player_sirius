@@ -88,7 +88,8 @@ hdc version
 2. 关闭 DevEco Studio 后删除本机生成的 `.idea/` 与 `.hvigor/` 缓存目录，再重新打开仓库根目录并执行 Sync。
 3. 确认根目录 `build-profile.json5` 中存在 `modules[].name = "entry"`，且 `srcPath` 指向 `./AppScope/entry`。
 4. 确认 `AppScope/entry/src/main/module.json5` 中 `module.type` 为 `entry`。
-5. 不要提交 `.idea/` 与 `.hvigor/`，这些目录是本机 IDE/构建缓存，可能让其他工作区复用旧的模块识别结果。
+5. 如果报 `The target can not be empty`，确认 `AppScope/entry/build-profile.json5` 中存在 `targets[].name = "default"`。
+6. 不要提交 `.idea/` 与 `.hvigor/`，这些目录是本机 IDE/构建缓存，可能让其他工作区复用旧的模块识别结果。
 
 ## 6. 初始化后的建议目录
 
