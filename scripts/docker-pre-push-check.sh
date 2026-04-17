@@ -34,6 +34,6 @@ docker run --rm \
       libnode-dev \
       make
     git config --global --add safe.directory /workspace
-    git config --global core.autocrlf true
+    git config --global core.autocrlf false
     bash scripts/pre-push-check.sh
   "

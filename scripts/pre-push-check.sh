@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 echo "[1/4] git diff --check"
-git diff --check --ignore-cr-at-eol
+git -c core.whitespace=-cr-at-eol diff --check --ignore-cr-at-eol
 
 echo "[2/4] docs snapshot"
 test -f docs/implementation-status.md

@@ -29,7 +29,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   libnode-dev \
   make
 git config --global --add safe.directory /workspace
-git config --global core.autocrlf true
+git config --global core.autocrlf false
 bash scripts/pre-push-check.sh
 "@
 
