@@ -6,9 +6,13 @@ interface LocalMediaEntry {
   uri: string;
   displayName: string;
   contentType: string;
+  createdAt: number;
+  lastAccessAt: number;
 }
 
 export class LocalMediaHttpServerService {
+  private static readonly TOKEN_TTL_MS: number = 30 * 60 * 1000;
+  private static readonly MAX_ENTRY_COUNT: number = 32;
   private server: socket.TCPSocketServer | null = null;
   private readonly portCandidates: number[] = [19081, 19082, 19083];
   private listenPort: number = 0;
@@ -20,12 +24,21 @@ export class LocalMediaHttpServerService {
     if (this.listenPort <= 0 || this.listenHost.length === 0) {
       return '';
     }
-    const token = Math.random().toString(36).slice(2, 12);
+    const normalizedUri = this.normalizeReadableUri(uri);
+    if (normalizedUri.length === 0) {
+      return '';
+    }
+    this.cleanupExpiredEntries();
+    const now = Date.now();
+    const token = this.createAccessToken();
     this.entries.set(token, {
-      uri,
+      uri: normalizedUri,
       displayName,
-      contentType: this.getContentType(displayName)
+      contentType: this.getContentType(displayName),
+      createdAt: now,
+      lastAccessAt: now
     });
+    this.trimEntries();
     return `http://${this.listenHost}:${this.listenPort}/media/${token}`;
   }
 
@@ -125,11 +138,18 @@ export class LocalMediaHttpServerService {
     }
 
     const token = mediaMatch[1];
+    this.cleanupExpiredEntries();
     const entry = this.entries.get(token);
     if (!entry) {
       await this.sendTextResponse(client, 404, 'Not Found', 'media expired');
       return;
     }
+    if (Date.now() - entry.createdAt > LocalMediaHttpServerService.TOKEN_TTL_MS) {
+      this.entries.delete(token);
+      await this.sendTextResponse(client, 404, 'Not Found', 'media expired');
+      return;
+    }
+    entry.lastAccessAt = Date.now();
 
     const rangeHeader = this.extractHeader(request, 'range');
     let start = 0;
@@ -275,5 +295,48 @@ export class LocalMediaHttpServerService {
       return 'video/x-flv';
     }
     return 'application/octet-stream';
+  }
+
+  private normalizeReadableUri(uri: string): string {
+    const trimmed = uri.trim();
+    if (trimmed.length === 0) {
+      return '';
+    }
+    if (trimmed.startsWith('file://')) {
+      return decodeURIComponent(trimmed.slice('file://'.length));
+    }
+    return trimmed;
+  }
+
+  private createAccessToken(): string {
+    return [
+      Date.now().toString(36),
+      Math.random().toString(36).slice(2, 10),
+      Math.random().toString(36).slice(2, 10),
+      Math.random().toString(36).slice(2, 10)
+    ].join('');
+  }
+
+  private cleanupExpiredEntries(): void {
+    const now = Date.now();
+    const expiredTokens: string[] = [];
+    this.entries.forEach((entry: LocalMediaEntry, token: string) => {
+      if (now - entry.createdAt > LocalMediaHttpServerService.TOKEN_TTL_MS) {
+        expiredTokens.push(token);
+      }
+    });
+    expiredTokens.forEach((token: string) => this.entries.delete(token));
+  }
+
+  private trimEntries(): void {
+    if (this.entries.size <= LocalMediaHttpServerService.MAX_ENTRY_COUNT) {
+      return;
+    }
+    const sorted = Array.from(this.entries.entries())
+      .sort((left: [string, LocalMediaEntry], right: [string, LocalMediaEntry]) => left[1].lastAccessAt - right[1].lastAccessAt);
+    const removeCount = this.entries.size - LocalMediaHttpServerService.MAX_ENTRY_COUNT;
+    for (let index = 0; index < removeCount; index++) {
+      this.entries.delete(sorted[index][0]);
+    }
   }
 }

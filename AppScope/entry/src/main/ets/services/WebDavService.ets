@@ -92,19 +92,19 @@ export class WebDavService {
   }
 
   private static parseMultiStatus(xml: string, requestUrl: string): WebDavEntry[] {
-    // Lightweight XML parsing via regex; good enough for typical WebDAV multistatus payloads.
-    const responses = xml.split(/<d:response[\s>]/i).slice(1).map((chunk: string) => `<d:response ${chunk}`);
+    // Keep parsing lightweight, but do not assume a specific namespace prefix such as `d:` or `D:`.
+    const responses = xml.match(/<(?:[\w-]+:)?response\b[\s\S]*?<\/(?:[\w-]+:)?response>/gi) ?? [];
     const entries: WebDavEntry[] = [];
     for (const resp of responses) {
-      const href = WebDavService.extractTag(resp, 'd:href') || WebDavService.extractTag(resp, 'D:href');
+      const href = WebDavService.extractTag(resp, 'href');
       if (!href) {
         continue;
       }
-      const displayName = WebDavService.extractTag(resp, 'd:displayname') || WebDavService.extractTag(resp, 'D:displayname') || '';
-      const sizeRaw = WebDavService.extractTag(resp, 'd:getcontentlength') || WebDavService.extractTag(resp, 'D:getcontentlength') || '0';
+      const displayName = WebDavService.extractTag(resp, 'displayname') || '';
+      const sizeRaw = WebDavService.extractTag(resp, 'getcontentlength') || '0';
       const sizeBytes = Number(sizeRaw) || 0;
 
-      const isCollection = /<d:collection\s*\/?>/i.test(resp) || /<D:collection\s*\/?>/i.test(resp);
+      const isCollection = /<(?:[\w-]+:)?collection\b[\s/]*>/i.test(resp);
       const absoluteHref = WebDavService.toAbsoluteHref(href, requestUrl);
       const name = displayName.trim().length > 0 ? displayName.trim() : WebDavService.basenameFromHref(absoluteHref);
       entries.push({
@@ -117,8 +117,8 @@ export class WebDavService {
     return entries;
   }
 
-  private static extractTag(xml: string, tag: string): string | null {
-    const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
+  private static extractTag(xml: string, localName: string): string | null {
+    const re = new RegExp(`<(?:[\\w-]+:)?${localName}[^>]*>([\\s\\S]*?)<\\/(?:[\\w-]+:)?${localName}>`, 'i');
     const match = xml.match(re);
     if (!match) {
       return null;
