@@ -35,6 +35,34 @@ const ALL_FOLDERS_LABEL = '全部文件夹';
 const WEAK_NET_STALL_THRESHOLD_MS = 6000;
 const NETWORK_AUTO_RETRY_LIMIT = 2;
 
+// Simple UI tokens for consistent spacing/colors across this single-page demo UI.
+// Keep them local to avoid a bigger refactor while still improving visual coherence.
+const UI = {
+  pageBg: '#F3F4F6',
+  cardBg: '#FFFFFF',
+  cardBorder: '#E5E7EB',
+  textPrimary: '#111827',
+  textSecondary: '#6B7280',
+  danger: '#DC2626',
+  warning: '#B45309',
+  brand: '#007DFF',
+  brandStrong: '#2563EB',
+  softBg: '#F9FAFB',
+  softBg2: '#F3F4F6'
+} as const;
+
+const UI_SPACING = {
+  pagePadding: 12,
+  cardPadding: 12,
+  gap: 10
+} as const;
+
+const UI_RADIUS = {
+  card: 16,
+  control: 12,
+  chip: 999
+} as const;
+
 @Entry
 @Component
 struct Index {
@@ -2260,17 +2288,21 @@ struct Index {
         Column() {
           Text('请选择本地视频或输入网络地址')
             .fontSize(18)
-            .fontColor(Color.Gray);
+            .fontColor(UI.textSecondary);
 
           if (this.errorMessage.length > 0) {
             Text(this.errorMessage)
               .fontSize(13)
-              .fontColor('#D9485F')
+              .fontColor(UI.danger)
               .margin({ top: 12 });
           }
 
           if (this.showPermissionGuide) {
             Button('去授权')
+              .height(36)
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.brand)
+              .fontColor(Color.White)
               .margin({ top: 12 })
               .onClick(async () => {
                 const granted = await this.ensureMediaPermission(true);
@@ -2282,6 +2314,10 @@ struct Index {
 
           Button('选择视频')
             .width(150)
+            .height(40)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.brand)
+            .fontColor(Color.White)
             .margin({ top: 20 })
             .onClick(() => {
               this.selectVideo();
@@ -2289,6 +2325,10 @@ struct Index {
 
           Button('扫描媒体库')
             .width(150)
+            .height(40)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .margin({ top: 12 })
             .onClick(() => {
               this.importMediaLibrary();
@@ -2297,10 +2337,16 @@ struct Index {
         .width('100%')
         .height(300)
         .justifyContent(FlexAlign.Center)
-        .backgroundColor('#F0F0F0');
+        .backgroundColor(UI.pageBg);
       }
 
       Column() {
+        Text('快捷操作')
+          .fontSize(13)
+          .fontColor(UI.textSecondary)
+          .width('100%')
+          .margin({ bottom: 8 });
+
         if (this.currentMediaItem) {
           Text(this.currentMediaItem.title)
             .fontSize(16)
@@ -2314,77 +2360,114 @@ struct Index {
         Row() {
           Button('选择视频')
             .fontSize(14)
+            .height(36)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.brand)
+            .fontColor(Color.White)
             .onClick(() => {
               this.selectVideo();
             });
 
-          Button('扫描媒体库')
-            .fontSize(14)
-            .margin({ left: 10 })
-            .onClick(() => {
-              this.importMediaLibrary();
-            });
-
-          Button('重扫目录')
-            .fontSize(14)
-            .margin({ left: 10 })
-            .onClick(() => {
-              this.rescanTrackedLibraryRoots();
-            });
-
           Button('媒体库')
             .fontSize(14)
+            .height(36)
             .margin({ left: 10 })
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .onClick(() => {
               this.activeLibraryTab = 'library';
               this.showLibrary = true;
             });
         }
         .width('100%')
+        .justifyContent(FlexAlign.Start);
+
+        Row() {
+          Button('扫描媒体库')
+            .fontSize(14)
+            .height(36)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
+            .onClick(() => {
+              this.importMediaLibrary();
+            });
+
+          Button('重扫目录')
+            .fontSize(14)
+            .height(36)
+            .margin({ left: 10 })
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
+            .onClick(() => {
+              this.rescanTrackedLibraryRoots();
+            });
+        }
+        .width('100%')
         .justifyContent(FlexAlign.Start)
-        .margin({ bottom: 10 });
+        .margin({ top: 10, bottom: 12 });
+
+        Text('播放内核')
+          .fontSize(13)
+          .fontColor(UI.textSecondary)
+          .width('100%')
+          .margin({ bottom: 8 });
 
         Row() {
           Button('自动')
             .fontSize(12)
-            .backgroundColor(this.kernelSelectionPolicy === 'auto' ? '#007DFF' : '#F3F4F6')
-            .fontColor(this.kernelSelectionPolicy === 'auto' ? Color.White : Color.Black)
+            .height(32)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(this.kernelSelectionPolicy === 'auto' ? UI.brand : UI.softBg2)
+            .fontColor(this.kernelSelectionPolicy === 'auto' ? Color.White : UI.textPrimary)
             .onClick(() => {
               this.switchKernel('auto');
             });
 
+          Text(this.getKernelStatusText())
+            .fontSize(12)
+            .fontColor(UI.textSecondary)
+            .margin({ left: 12 })
+            .layoutWeight(1);
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .margin({ bottom: 8 });
+
+        Row() {
           Button('ArkUI Video')
             .fontSize(12)
-            .margin({ left: 8 })
-            .backgroundColor(this.playerKernelMode === 'video-component' ? '#007DFF' : '#F3F4F6')
-            .fontColor(this.playerKernelMode === 'video-component' ? Color.White : Color.Black)
+            .height(32)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(this.playerKernelMode === 'video-component' ? UI.brand : UI.softBg2)
+            .fontColor(this.playerKernelMode === 'video-component' ? Color.White : UI.textPrimary)
             .onClick(() => {
               this.switchKernel('video-component');
             });
 
           Button('AVPlayer')
             .fontSize(12)
+            .height(32)
             .margin({ left: 8 })
-            .backgroundColor(this.playerKernelMode === 'avplayer-native' ? '#007DFF' : '#F3F4F6')
-            .fontColor(this.playerKernelMode === 'avplayer-native' ? Color.White : Color.Black)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(this.playerKernelMode === 'avplayer-native' ? UI.brand : UI.softBg2)
+            .fontColor(this.playerKernelMode === 'avplayer-native' ? Color.White : UI.textPrimary)
             .onClick(() => {
               this.switchKernel('avplayer-native');
             });
 
           Button('Native')
             .fontSize(12)
+            .height(32)
             .margin({ left: 8 })
-            .backgroundColor(this.playerKernelMode === 'native-bridge' ? '#007DFF' : '#F3F4F6')
-            .fontColor(this.playerKernelMode === 'native-bridge' ? Color.White : Color.Black)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(this.playerKernelMode === 'native-bridge' ? UI.brand : UI.softBg2)
+            .fontColor(this.playerKernelMode === 'native-bridge' ? Color.White : UI.textPrimary)
             .onClick(() => {
               this.switchKernel('native-bridge');
             });
-
-          Text(this.getKernelStatusText())
-            .fontSize(12)
-            .fontColor('#6B7280')
-            .margin({ left: 12 })
-            .layoutWeight(1);
         }
         .width('100%')
         .alignItems(VerticalAlign.Center)
@@ -2393,6 +2476,10 @@ struct Index {
         Row() {
           Button('历史记录')
             .fontSize(14)
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .onClick(() => {
               this.showHistory = true;
             });
@@ -2400,6 +2487,10 @@ struct Index {
           Button('播放列表')
             .fontSize(14)
             .margin({ left: 10 })
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .onClick(() => {
               this.updatePlaylist();
               this.showPlaylist = true;
@@ -2408,6 +2499,10 @@ struct Index {
           Button(this.currentMediaItem?.isFavorite ? '取消收藏' : '收藏')
             .fontSize(14)
             .margin({ left: 10 })
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .enabled(!!this.currentMediaItem)
             .onClick(() => {
               if (this.currentMediaItem) {
@@ -2422,6 +2517,10 @@ struct Index {
         Row() {
           Button(this.isLandscapeMode ? '竖屏' : '横屏')
             .fontSize(14)
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .onClick(() => {
               this.toggleOrientation();
             });
@@ -2429,6 +2528,10 @@ struct Index {
           Button(`画面${this.getScaleModeLabel()}`)
             .fontSize(14)
             .margin({ left: 10 })
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .onClick(() => {
               this.cycleFitMode();
             });
@@ -2436,6 +2539,10 @@ struct Index {
           Button('旋转画面')
             .fontSize(14)
             .margin({ left: 10 })
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .onClick(() => {
               this.rotateVideo();
             });
@@ -2443,6 +2550,10 @@ struct Index {
           Button('字幕/音轨')
             .fontSize(14)
             .margin({ left: 10 })
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
             .onClick(() => {
               this.showTrackPanel = true;
             });
@@ -2454,7 +2565,7 @@ struct Index {
         if (this.errorMessage.length > 0) {
           Text(this.errorMessage)
             .fontSize(13)
-            .fontColor('#D9485F')
+            .fontColor(UI.danger)
             .width('100%')
             .margin({ bottom: 12 });
         }
@@ -2462,7 +2573,7 @@ struct Index {
         if (this.lastFallbackMessage.length > 0) {
           Text(this.lastFallbackMessage)
             .fontSize(12)
-            .fontColor('#2563EB')
+            .fontColor(UI.brandStrong)
             .width('100%')
             .margin({ bottom: 12 });
         }
@@ -2470,7 +2581,7 @@ struct Index {
         if (this.libraryMessage.length > 0) {
           Text(this.libraryMessage)
             .fontSize(12)
-            .fontColor('#2563EB')
+            .fontColor(UI.brandStrong)
             .width('100%')
             .margin({ bottom: 12 });
         }
@@ -2504,6 +2615,10 @@ struct Index {
 
             Button(this.showNetworkInput ? '收起' : '展开')
               .fontSize(12)
+              .height(30)
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg2)
+              .fontColor(UI.textPrimary)
               .onClick(() => {
                 this.showNetworkInput = !this.showNetworkInput;
               });
@@ -2511,6 +2626,10 @@ struct Index {
             Button('WebDAV')
               .fontSize(12)
               .margin({ left: 8 })
+              .height(30)
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg2)
+              .fontColor(UI.textPrimary)
               .onClick(() => {
                 this.showRemotePanel = true;
               });
@@ -2518,6 +2637,10 @@ struct Index {
             Button('投屏')
               .fontSize(12)
               .margin({ left: 8 })
+              .height(30)
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg2)
+              .fontColor(UI.textPrimary)
               .onClick(() => {
                 this.showCastingPanel = true;
                 this.refreshDlnaStatus(false);
@@ -2530,8 +2653,8 @@ struct Index {
             TextInput({ text: this.networkUrl, placeholder: '输入 HTTP/HTTPS 或 m3u8 地址' })
               .width('100%')
               .margin({ top: 10 })
-              .backgroundColor('#F3F4F6')
-              .borderRadius(10)
+              .backgroundColor(UI.softBg2)
+              .borderRadius(UI_RADIUS.control)
               .onChange((value: string) => {
                 this.networkUrl = value;
               });
@@ -2539,6 +2662,10 @@ struct Index {
             Row() {
               Button('打开链接')
                 .fontSize(14)
+                .height(34)
+                .borderRadius(UI_RADIUS.control)
+                .backgroundColor(UI.brand)
+                .fontColor(Color.White)
                 .onClick(() => {
                   this.openNetworkMedia();
                 });
@@ -2546,6 +2673,10 @@ struct Index {
               Button('HLS 示例')
                 .fontSize(14)
                 .margin({ left: 10 })
+                .height(34)
+                .borderRadius(UI_RADIUS.control)
+                .backgroundColor(UI.softBg2)
+                .fontColor(UI.textPrimary)
                 .onClick(() => {
                   this.networkUrl = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
                 });
@@ -2555,8 +2686,9 @@ struct Index {
         }
         .width('100%')
         .padding(12)
-        .borderRadius(12)
-        .backgroundColor('#F9FAFB')
+        .borderRadius(UI_RADIUS.control)
+        .backgroundColor(UI.softBg)
+        .border({ width: 1, color: UI.cardBorder })
         .margin({ bottom: 12 });
 
         if (this.currentMediaItem) {
@@ -2645,7 +2777,7 @@ struct Index {
 
           Text('在画面区域横向滑动快进/快退，纵向滑动调节音量；也可使用下面的快捷按钮。')
             .fontSize(12)
-            .fontColor('#6B7280')
+            .fontColor(UI.textSecondary)
             .width('100%')
             .margin({ top: 4 });
 
@@ -2682,8 +2814,9 @@ struct Index {
         }
         .width('100%')
         .padding(12)
-        .borderRadius(12)
-        .backgroundColor('#F9FAFB')
+        .borderRadius(UI_RADIUS.control)
+        .backgroundColor(UI.softBg)
+        .border({ width: 1, color: UI.cardBorder })
         .margin({ bottom: 12 });
 
         Row() {
@@ -2817,7 +2950,7 @@ struct Index {
         if (this.isBuffering) {
           Text(`正在缓冲... ${this.bufferPercent}% · 预计已缓存 ${this.cachedDurationSeconds}s`)
             .fontSize(12)
-            .fontColor('#B45309')
+            .fontColor(UI.warning)
             .width('100%')
             .margin({ top: 6 });
         }
@@ -2832,16 +2965,20 @@ struct Index {
 
         Text('当前已补充横竖屏、画面比例/旋转、滑动快调和信息面板；字幕、多音轨、后台播放等高级能力仍建议切换到 AVPlayer 或 Native 内核。')
           .fontSize(11)
-          .fontColor('#6B7280')
+          .fontColor(UI.textSecondary)
           .width('100%')
           .margin({ top: 12 });
       }
       .width('100%')
-      .padding(20);
+      .padding(UI_SPACING.cardPadding)
+      .backgroundColor(UI.cardBg)
+      .borderRadius(UI_RADIUS.card)
+      .border({ width: 1, color: UI.cardBorder })
+      .margin({ left: UI_SPACING.pagePadding, right: UI_SPACING.pagePadding, top: 12, bottom: UI_SPACING.pagePadding });
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#FFFFFF')
+    .backgroundColor(UI.pageBg)
     .bindSheet($$this.showSpeedPicker, this.SpeedPickerBuilder(), {
       height: 300,
       dragBar: true,
@@ -2914,6 +3051,7 @@ struct Index {
       Text('选择播放速度')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
+        .fontColor(UI.textPrimary)
         .margin({ top: 20, bottom: 20 });
 
       List({ space: 10 }) {
@@ -2924,8 +3062,8 @@ struct Index {
               .width('100%')
               .height(50)
               .textAlign(TextAlign.Center)
-              .borderRadius(8)
-              .backgroundColor(speed === this.currentSpeed ? '#007DFF' : '#F0F0F0')
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(speed === this.currentSpeed ? UI.brand : UI.softBg2)
               .fontColor(speed === this.currentSpeed ? Color.White : Color.Black)
               .onClick(() => {
                 this.changeSpeed(speed);
@@ -2938,7 +3076,8 @@ struct Index {
       .padding({ left: 10, right: 10 });
     }
     .width('100%')
-    .height('100%');
+    .height('100%')
+    .backgroundColor(UI.cardBg);
   }
 
   @Builder
@@ -2947,12 +3086,13 @@ struct Index {
       Text('播放列表')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
+        .fontColor(UI.textPrimary)
         .margin({ top: 20, bottom: 20 });
 
       if (this.playlistItems.length === 0) {
         Text('播放列表为空')
           .fontSize(16)
-          .fontColor(Color.Gray);
+          .fontColor(UI.textSecondary);
       } else {
         List({ space: 8 }) {
           ForEach(this.playlistItems, (item: MediaItem, index: number) => {
@@ -2980,8 +3120,8 @@ struct Index {
               .width('100%')
               .height(54)
               .padding({ left: 15, right: 15 })
-              .borderRadius(8)
-              .backgroundColor(index === this.playerService.getPlaylist().getCurrentIndex() ? '#E8F4FF' : '#F8F8F8')
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(index === this.playerService.getPlaylist().getCurrentIndex() ? '#E8F4FF' : UI.softBg)
               .onClick(() => {
                 this.playFromPlaylist(index);
               });
@@ -2994,7 +3134,8 @@ struct Index {
       }
     }
     .width('100%')
-    .height('100%');
+    .height('100%')
+    .backgroundColor(UI.cardBg);
   }
 
   @Builder
@@ -3003,12 +3144,13 @@ struct Index {
       Text('播放历史')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
+        .fontColor(UI.textPrimary)
         .margin({ top: 20, bottom: 20 });
 
       if (this.historyItems.length === 0) {
         Text('暂无播放历史')
           .fontSize(16)
-          .fontColor(Color.Gray);
+          .fontColor(UI.textSecondary);
       } else {
         List({ space: 8 }) {
           ForEach(this.historyItems, (item: MediaItem) => {
@@ -3035,8 +3177,8 @@ struct Index {
               .width('100%')
               .alignItems(HorizontalAlign.Start)
               .padding({ left: 15, right: 15, top: 10, bottom: 10 })
-              .borderRadius(8)
-              .backgroundColor('#F8F8F8')
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg)
               .onClick(() => {
                 this.openFromHistory(item);
               });
@@ -3049,7 +3191,8 @@ struct Index {
       }
     }
     .width('100%')
-    .height('100%');
+    .height('100%')
+    .backgroundColor(UI.cardBg);
   }
 
   @Builder
@@ -3058,6 +3201,7 @@ struct Index {
       Text('媒体库')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
+        .fontColor(UI.textPrimary)
         .margin({ top: 20, bottom: 16 });
 
       Row() {
@@ -3142,7 +3286,7 @@ struct Index {
       if (this.getVisibleLibraryItems().length === 0) {
         Text('当前视图暂无媒体')
           .fontSize(16)
-          .fontColor(Color.Gray);
+            .fontColor(UI.textSecondary);
       } else {
         List({ space: 8 }) {
           ForEach(this.getVisibleLibraryItems(), (item: MediaItem) => {
@@ -3203,8 +3347,8 @@ struct Index {
               }
               .width('100%')
               .padding({ left: 15, right: 15, top: 12, bottom: 12 })
-              .borderRadius(8)
-              .backgroundColor('#F8F8F8')
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg)
               .onClick(() => {
                 this.openFromLibrary(item);
               });
