@@ -35,9 +35,33 @@ const ALL_FOLDERS_LABEL = '全部文件夹';
 const WEAK_NET_STALL_THRESHOLD_MS = 6000;
 const NETWORK_AUTO_RETRY_LIMIT = 2;
 
-// Simple UI tokens for consistent spacing/colors across this single-page demo UI.
-// Keep them local to avoid a bigger refactor while still improving visual coherence.
-const UI = {
+interface UiPalette {
+  pageBg: string;
+  cardBg: string;
+  cardBorder: string;
+  textPrimary: string;
+  textSecondary: string;
+  danger: string;
+  warning: string;
+  brand: string;
+  brandStrong: string;
+  softBg: string;
+  softBg2: string;
+}
+
+interface UiSpacing {
+  pagePadding: number;
+  cardPadding: number;
+  gap: number;
+}
+
+interface UiRadius {
+  card: number;
+  control: number;
+  chip: number;
+}
+
+const UI: UiPalette = {
   pageBg: '#F3F4F6',
   cardBg: '#FFFFFF',
   cardBorder: '#E5E7EB',
@@ -49,19 +73,19 @@ const UI = {
   brandStrong: '#2563EB',
   softBg: '#F9FAFB',
   softBg2: '#F3F4F6'
-} as const;
+};
 
-const UI_SPACING = {
+const UI_SPACING: UiSpacing = {
   pagePadding: 12,
   cardPadding: 12,
   gap: 10
-} as const;
+};
 
-const UI_RADIUS = {
-  card: 16,
-  control: 12,
+const UI_RADIUS: UiRadius = {
+  card: 8,
+  control: 8,
   chip: 999
-} as const;
+};
 
 @Entry
 @Component
@@ -515,14 +539,17 @@ struct Index {
   }
 
   private supportsAudioTrackFeature(): boolean {
-    return this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'multiAudioTrack');
+    return this.playerKernelService.supportsFeatureByMode(this.playerKernelMode, 'multiAudioTrack') && this.isUsingAVPlayer();
   }
 
   private getTrackPanelHint(): string {
     if (this.supportsAudioTrackFeature()) {
-      return '当前内核支持真实多音轨切换。';
+      return '当前内核支持真实多音轨切换，字幕开关与偏移也会即时生效。';
     }
-    return '当前版本仅预留字幕/音轨入口，真实切换尚未接入 AVPlayer 或 Native 内核。';
+    if (this.supportsSubtitleFeature()) {
+      return '当前内核支持外挂字幕；多音轨真实切换仅在 AVPlayer 路径下可用。';
+    }
+    return '当前内核暂不支持字幕与多音轨能力，请切换到 AVPlayer 后再试。';
   }
 
   private isUsingAVPlayer(): boolean {
@@ -1104,7 +1131,7 @@ struct Index {
     await this.storageService.saveSmbProfile(profile);
     this.smbProfiles = await this.storageService.getSmbProfiles();
     this.smbSelectedProfileId = profile.id;
-    this.smbMessage = `已保存 SMB 连接：${profile.name}`;
+    this.smbMessage = `已保存 SMB 连接：${profile.name}。出于安全考虑，密码不会写入本地配置。`;
   }
 
   private async deleteSelectedSmbProfile(): Promise<void> {
@@ -1358,7 +1385,7 @@ struct Index {
 
   private adjustSubtitleOffset(delta: number): void {
     if (!this.supportsSubtitleOffsetFeature()) {
-      this.gestureHint = '字幕偏移尚未实现';
+      this.gestureHint = '当前内核不支持字幕偏移';
       return;
     }
     this.subtitleOffsetSeconds = Math.max(-10, Math.min(this.subtitleOffsetSeconds + delta, 10));
@@ -1369,7 +1396,7 @@ struct Index {
     if (!this.supportsSubtitleFeature()) {
       this.subtitleEnabled = false;
       this.currentSubtitleLabel = '未加载';
-      this.gestureHint = '外挂字幕尚未实现';
+      this.gestureHint = '当前内核不支持外挂字幕';
       return;
     }
     if (this.subtitleCues.length === 0) {
@@ -1484,15 +1511,6 @@ struct Index {
     const adjustedMs = Math.floor((currentTimeSeconds - this.subtitleOffsetSeconds) * 1000);
     const cue = SubtitleService.findCueAt(this.subtitleCues, adjustedMs);
     this.subtitleText = cue ? cue.text : '';
-  }
-
-  private selectAudioTrack(trackName: string): void {
-    if (!this.supportsAudioTrackFeature()) {
-      this.gestureHint = '多音轨切换尚未实现';
-      return;
-    }
-    this.currentAudioTrack = trackName;
-    this.gestureHint = `已切换到 ${trackName}`;
   }
 
   private async selectAudioTrackByIndex(trackIndex: number): Promise<void> {
@@ -3902,6 +3920,12 @@ struct Index {
         }
         .width('90%')
         .margin({ top: 10 });
+
+        Text('说明：SMB 配置仅保存主机、共享名和用户名，密码不会写入本地；切换已保存配置后需要重新输入密码。')
+          .fontSize(11)
+          .fontColor('#6B7280')
+          .width('90%')
+          .margin({ top: 10 });
 
         Row() {
           Button('保存配置')

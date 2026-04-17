@@ -70,7 +70,7 @@ export class PlayerKernelService {
       hlsPlayback: true,
       externalSubtitle: true,
       subtitleOffset: true,
-      multiAudioTrack: true,
+      multiAudioTrack: false,
       backgroundPlayback: true,
       audioFocus: true,
       smb: false,
