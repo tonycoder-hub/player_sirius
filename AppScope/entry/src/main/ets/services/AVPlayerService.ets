@@ -46,7 +46,7 @@ export class AVPlayerService {
 
   async setSurfaceId(surfaceId: string): Promise<void> {
     this.surfaceId = surfaceId;
-    if (!this.avPlayer || surfaceId.length === 0) {
+    if (!this.avPlayer || surfaceId.length === 0 || this.avPlayer.state !== 'initialized') {
       return;
     }
 
@@ -59,13 +59,13 @@ export class AVPlayerService {
   }
 
   async open(url: string, autoPlay: boolean = true): Promise<void> {
+    if (this.avPlayer) {
+      await this.release();
+    }
     const player = await this.ensurePlayer();
     this.autoPlayOnPrepared = autoPlay;
 
     try {
-      if (player.state !== 'idle') {
-        await player.reset();
-      }
       player.url = url;
     } catch (err) {
       const error = err as BusinessError;
@@ -76,6 +76,9 @@ export class AVPlayerService {
 
   async play(): Promise<void> {
     if (!this.avPlayer) {
+      return;
+    }
+    if (!['prepared', 'paused', 'completed'].includes(this.avPlayer.state)) {
       return;
     }
 
@@ -91,6 +94,9 @@ export class AVPlayerService {
     if (!this.avPlayer) {
       return;
     }
+    if (this.avPlayer.state !== 'playing') {
+      return;
+    }
 
     try {
       await this.avPlayer.pause();
@@ -104,6 +110,9 @@ export class AVPlayerService {
     if (!this.avPlayer) {
       return;
     }
+    if (!['prepared', 'playing', 'paused', 'completed'].includes(this.avPlayer.state)) {
+      return;
+    }
 
     try {
       await this.avPlayer.stop();
@@ -115,6 +124,9 @@ export class AVPlayerService {
 
   async seek(seconds: number): Promise<void> {
     if (!this.avPlayer) {
+      return;
+    }
+    if (!Number.isFinite(seconds) || seconds < 0 || !['prepared', 'playing', 'paused', 'completed'].includes(this.avPlayer.state)) {
       return;
     }
 
@@ -179,6 +191,9 @@ export class AVPlayerService {
     if (!this.avPlayer) {
       return;
     }
+    if (!['prepared', 'playing', 'paused', 'completed'].includes(this.avPlayer.state)) {
+      return;
+    }
 
     try {
       await this.avPlayer.selectTrack(trackIndex);
@@ -190,6 +205,9 @@ export class AVPlayerService {
 
   async deselectTrack(trackIndex: number): Promise<void> {
     if (!this.avPlayer) {
+      return;
+    }
+    if (!['prepared', 'playing', 'paused', 'completed'].includes(this.avPlayer.state)) {
       return;
     }
 
@@ -230,7 +248,13 @@ export class AVPlayerService {
 
         if (state === 'initialized') {
           if (this.surfaceId.length > 0) {
-            this.avPlayer.surfaceId = this.surfaceId;
+            try {
+              this.avPlayer.surfaceId = this.surfaceId;
+            } catch (err) {
+              const error = err as BusinessError;
+              console.error(`Set AVPlayer surface in initialized failed: ${error.code}, ${error.message}`);
+              this.surfaceId = '';
+            }
           }
           await this.avPlayer.prepare();
           return;
@@ -305,6 +329,9 @@ export class AVPlayerService {
   }
 
   private async applyVolume(player: media.AVPlayer): Promise<void> {
+    if (!['prepared', 'playing', 'paused', 'completed'].includes(player.state)) {
+      return;
+    }
     try {
       await player.setVolume(this.currentVolume);
     } catch (err) {
@@ -314,6 +341,9 @@ export class AVPlayerService {
   }
 
   private async applySpeed(player: media.AVPlayer): Promise<void> {
+    if (!['prepared', 'playing', 'paused', 'completed'].includes(player.state)) {
+      return;
+    }
     try {
       await player.setSpeed(this.currentSpeed);
     } catch (err) {

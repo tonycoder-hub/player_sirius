@@ -9,8 +9,17 @@ const KEY_HISTORY = 'play_history';
 const KEY_LIBRARY = 'media_library';
 const KEY_LIBRARY_ROOTS = 'media_library_roots';
 const KEY_SMB_PROFILES = 'smb_profiles';
+const KEY_SUBTITLE_BINDINGS = 'subtitle_bindings';
 const MAX_HISTORY_SIZE = 50;
 const MAX_LIBRARY_SIZE = 200;
+
+export interface SubtitleBinding {
+  mediaUri: string;
+  subtitleUri: string;
+  subtitleLabel: string;
+  offsetSeconds: number;
+  updatedAt: number;
+}
 
 export class StorageService {
   private context: Context | null = null;
@@ -116,6 +125,16 @@ export class StorageService {
     const prefs = await this.getPreferences();
     await prefs.put(key, JSON.stringify(values));
     await prefs.flush();
+  }
+
+  private createDefaultSubtitleBinding(binding: Partial<SubtitleBinding>): SubtitleBinding {
+    return {
+      mediaUri: binding.mediaUri ?? '',
+      subtitleUri: binding.subtitleUri ?? '',
+      subtitleLabel: binding.subtitleLabel ?? '',
+      offsetSeconds: Number(binding.offsetSeconds ?? 0),
+      updatedAt: Number(binding.updatedAt ?? Date.now())
+    };
   }
 
   private createDefaultSmbProfile(profile: Partial<SmbConnectionProfile>): SmbConnectionProfile {
@@ -338,6 +357,69 @@ export class StorageService {
     } catch (err) {
       const message = err instanceof Error ? err.message : JSON.stringify(err);
       console.error(`Delete SMB profile failed: ${message}`);
+    }
+  }
+
+  async saveSubtitleBinding(binding: SubtitleBinding): Promise<void> {
+    if (binding.mediaUri.trim().length === 0 || binding.subtitleUri.trim().length === 0) {
+      return;
+    }
+    try {
+      const prefs = await this.getPreferences();
+      const rawValue = await prefs.get(KEY_SUBTITLE_BINDINGS, '[]');
+      const parsed = JSON.parse(rawValue as string) as Partial<SubtitleBinding>[];
+      const normalized = this.createDefaultSubtitleBinding({
+        mediaUri: binding.mediaUri,
+        subtitleUri: binding.subtitleUri,
+        subtitleLabel: binding.subtitleLabel,
+        offsetSeconds: binding.offsetSeconds,
+        updatedAt: Date.now()
+      });
+      const next = parsed
+        .map((item: Partial<SubtitleBinding>) => this.createDefaultSubtitleBinding(item))
+        .filter((item: SubtitleBinding) => item.mediaUri.length > 0 && item.mediaUri !== normalized.mediaUri);
+      next.unshift(normalized);
+      await prefs.put(KEY_SUBTITLE_BINDINGS, JSON.stringify(next.slice(0, 200)));
+      await prefs.flush();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Save subtitle binding failed: ${message}`);
+    }
+  }
+
+  async getSubtitleBinding(mediaUri: string): Promise<SubtitleBinding | null> {
+    if (mediaUri.trim().length === 0) {
+      return null;
+    }
+    try {
+      const prefs = await this.getPreferences();
+      const rawValue = await prefs.get(KEY_SUBTITLE_BINDINGS, '[]');
+      const parsed = JSON.parse(rawValue as string) as Partial<SubtitleBinding>[];
+      const bindings = parsed.map((item: Partial<SubtitleBinding>) => this.createDefaultSubtitleBinding(item));
+      return bindings.find((item: SubtitleBinding) => item.mediaUri === mediaUri && item.subtitleUri.length > 0) ?? null;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Get subtitle binding failed: ${message}`);
+      return null;
+    }
+  }
+
+  async deleteSubtitleBinding(mediaUri: string): Promise<void> {
+    if (mediaUri.trim().length === 0) {
+      return;
+    }
+    try {
+      const prefs = await this.getPreferences();
+      const rawValue = await prefs.get(KEY_SUBTITLE_BINDINGS, '[]');
+      const parsed = JSON.parse(rawValue as string) as Partial<SubtitleBinding>[];
+      const next = parsed
+        .map((item: Partial<SubtitleBinding>) => this.createDefaultSubtitleBinding(item))
+        .filter((item: SubtitleBinding) => item.mediaUri.length > 0 && item.mediaUri !== mediaUri);
+      await prefs.put(KEY_SUBTITLE_BINDINGS, JSON.stringify(next));
+      await prefs.flush();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      console.error(`Delete subtitle binding failed: ${message}`);
     }
   }
 

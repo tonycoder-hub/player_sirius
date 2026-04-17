@@ -2,6 +2,7 @@ import { picker, fileIo as fs } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { common } from '@kit.AbilityKit';
 import { media } from '@kit.MediaKit';
+import { avSession, AVCastPickerStyle } from '@kit.AVSessionKit';
 import window from '@ohos.window';
 import audio from '@ohos.multimedia.audio';
 import url from '@ohos.url';
@@ -115,6 +116,7 @@ struct Index {
   @State showTrackPanel: boolean = false;
   @State showRemotePanel: boolean = false;
   @State showCastingPanel: boolean = false;
+  @State activeHomeSection: string = 'videos';
   @State playlistItems: MediaItem[] = [];
   @State historyItems: MediaItem[] = [];
   @State libraryItems: MediaItem[] = [];
@@ -211,6 +213,8 @@ struct Index {
   private attemptedKernelModes: string[] = [];
   private fallbackInProgress: boolean = false;
   private cleanupChain: Promise<void> = Promise.resolve();
+  private playbackChain: Promise<void> = Promise.resolve();
+  private playbackStartSeq: number = 0;
   private cleanupSeq: number = 0;
   private cleanupInFlight: number = 0;
 
@@ -266,6 +270,14 @@ struct Index {
       });
 
     this.cleanupChain = next;
+    return next;
+  }
+
+  private runPlaybackTask(task: () => Promise<void>): Promise<void> {
+    const next = this.playbackChain
+      .catch(() => {})
+      .then(task);
+    this.playbackChain = next;
     return next;
   }
   private syncPlayerState(): void {
@@ -578,9 +590,13 @@ struct Index {
     if (!this.currentMediaItem) {
       return;
     }
+    const startSeq = ++this.playbackStartSeq;
     if (this.isUsingNativePlayer()) {
       this.isLoading = true;
       const prepared = this.nativePlayerBridgeService.prepare(this.currentMediaItem.uri, this.avPlayerSurfaceId);
+      if (startSeq !== this.playbackStartSeq) {
+        return;
+      }
       this.refreshNativeBridgeSummary();
       if (!prepared) {
         await this.handlePlaybackFailureWithRecovery('Native 内核当前不可用，正在回退到其他播放路径');
@@ -599,6 +615,9 @@ struct Index {
       if (this.avPlayerSurfaceId.length > 0) {
         this.isLoading = true;
         await this.avPlayerService.setSurfaceId(this.avPlayerSurfaceId);
+        if (startSeq !== this.playbackStartSeq) {
+          return;
+        }
         await this.avPlayerService.open(this.currentMediaItem.uri, true);
       }
       return;
@@ -1262,6 +1281,24 @@ struct Index {
     }
   }
 
+  private async openSystemCastPicker(): Promise<void> {
+    if (!canIUse('SystemCapability.Multimedia.AVSession.AVCast')) {
+      this.dlnaMessage = '当前设备暂不支持鸿蒙系统投播能力，请使用 DLNA 扩展。';
+      return;
+    }
+    try {
+      const helper = new avSession.AVCastPickerHelper(this.getUiContext());
+      await helper.select({
+        sessionType: 'video',
+        pickerStyle: AVCastPickerStyle.STYLE_PANEL
+      });
+      this.dlnaMessage = '已打开鸿蒙系统投播面板。';
+    } catch (err) {
+      const error = err as BusinessError;
+      this.dlnaMessage = `打开系统投播失败：${error.message ?? `${err}`}`;
+    }
+  }
+
   private setWebDavPathFromHref(href: string): void {
     try {
       const base = new url.URL(this.webDavBaseUrl.trim());
@@ -1390,6 +1427,15 @@ struct Index {
     }
     this.subtitleOffsetSeconds = Math.max(-10, Math.min(this.subtitleOffsetSeconds + delta, 10));
     this.updateSubtitleRender(this.currentTime);
+    if (this.currentMediaItem && this.subtitleUri.length > 0) {
+      this.storageService.saveSubtitleBinding({
+        mediaUri: this.currentMediaItem.uri,
+        subtitleUri: this.subtitleUri,
+        subtitleLabel: this.getSubtitleFileName(),
+        offsetSeconds: this.subtitleOffsetSeconds,
+        updatedAt: Date.now()
+      });
+    }
   }
 
   private toggleSubtitle(): void {
@@ -1418,18 +1464,126 @@ struct Index {
     return segments.length > 0 ? segments[segments.length - 1] : this.subtitleUri;
   }
 
+  private normalizeMatchName(uriOrName: string): string {
+    const displayName = this.getFileNameFromUri(uriOrName).toLowerCase();
+    const withoutQuery = displayName.split('?')[0];
+    const dotIndex = withoutQuery.lastIndexOf('.');
+    const baseName = dotIndex > 0 ? withoutQuery.slice(0, dotIndex) : withoutQuery;
+    return baseName.replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '');
+  }
+
+  private longestCommonSubsequenceLength(left: string, right: string): number {
+    if (left.length === 0 || right.length === 0) {
+      return 0;
+    }
+    const previous: number[] = new Array(right.length + 1).fill(0);
+    const current: number[] = new Array(right.length + 1).fill(0);
+    for (let i = 1; i <= left.length; i++) {
+      for (let j = 1; j <= right.length; j++) {
+        current[j] = left[i - 1] === right[j - 1]
+          ? previous[j - 1] + 1
+          : Math.max(previous[j], current[j - 1]);
+      }
+      for (let j = 0; j <= right.length; j++) {
+        previous[j] = current[j];
+        current[j] = 0;
+      }
+    }
+    return previous[right.length];
+  }
+
+  private chooseBestSubtitleUri(candidates: string[]): string {
+    if (candidates.length === 0) {
+      return '';
+    }
+    if (!this.currentMediaItem) {
+      return candidates[0];
+    }
+    const mediaName = this.normalizeMatchName(this.currentMediaItem.title || this.currentMediaItem.uri);
+    let bestUri = candidates[0];
+    let bestScore = -1;
+    for (const uri of candidates) {
+      const subtitleName = this.normalizeMatchName(uri);
+      const lcs = this.longestCommonSubsequenceLength(mediaName, subtitleName);
+      const denominator = Math.max(1, Math.max(mediaName.length, subtitleName.length));
+      const score = lcs / denominator;
+      if (score > bestScore) {
+        bestScore = score;
+        bestUri = uri;
+      }
+    }
+    return bestUri;
+  }
+
+  private getParentUri(uri: string): string {
+    const normalized = uri.split('?')[0].replace(/\/+$/, '');
+    const index = normalized.lastIndexOf('/');
+    if (index <= 0) {
+      return '';
+    }
+    return normalized.slice(0, index);
+  }
+
+  private isSubtitleUri(uri: string): boolean {
+    return uri.split('?')[0].toLowerCase().endsWith('.srt');
+  }
+
+  private joinDirectoryUri(directoryUri: string, relativeName: string): string {
+    const base = directoryUri.replace(/\/+$/, '');
+    const rel = relativeName.replace(/^\/+/, '');
+    return `${base}/${rel}`;
+  }
+
+  private async findSiblingSubtitleCandidates(mediaUri: string): Promise<string[]> {
+    const directoryUri = this.getParentUri(mediaUri);
+    if (directoryUri.length === 0) {
+      return [];
+    }
+    try {
+      const names = await fs.listFile(directoryUri);
+      return names
+        .map((name: string) => this.joinDirectoryUri(directoryUri, name))
+        .filter((uri: string) => this.isSubtitleUri(uri));
+    } catch {
+      return [];
+    }
+  }
+
+  private async loadBestSiblingSubtitleForItem(item: MediaItem): Promise<boolean> {
+    const candidates = await this.findSiblingSubtitleCandidates(item.uri);
+    if (candidates.length === 0) {
+      return false;
+    }
+    const selectedUri = this.chooseBestSubtitleUri(candidates);
+    if (selectedUri.length === 0) {
+      return false;
+    }
+    await this.loadSubtitleFromUri(selectedUri, true);
+    if (this.subtitleCues.length === 0) {
+      return false;
+    }
+    this.subtitleMessage = candidates.length > 1
+      ? `已从同目录 ${candidates.length} 个字幕中自动匹配：${this.getSubtitleFileName()}`
+      : `已自动加载同目录字幕：${this.getSubtitleFileName()}`;
+    return true;
+  }
+
   private async pickSubtitleFile(): Promise<void> {
     try {
       const context = this.getUiContext();
       const options = new picker.DocumentSelectOptions();
-      options.maxSelectNumber = 1;
+      options.maxSelectNumber = 20;
       options.fileSuffixFilters = ['字幕文件(.srt)|.srt', '所有文件(*.*)|.*'];
       const documentPicker = new picker.DocumentViewPicker(context);
       const result = await documentPicker.select(options);
       if (!result || result.length === 0) {
         return;
       }
-      await this.loadSubtitleFromUri(result[0]);
+      const selectedUri = this.chooseBestSubtitleUri(result);
+      await this.loadSubtitleFromUri(selectedUri, true);
+      if (result.length > 1) {
+        this.subtitleMessage = `${this.subtitleMessage} 已从 ${result.length} 个字幕中按文件名匹配选择 ${this.getSubtitleFileName()}。`;
+      }
     } catch (err) {
       const error = err as BusinessError;
       console.error(`Pick subtitle failed: ${error.code}, ${error.message}`);
@@ -1437,7 +1591,7 @@ struct Index {
     }
   }
 
-  private clearSubtitle(): void {
+  private resetSubtitleState(): void {
     this.subtitleUri = '';
     this.subtitleCues = [];
     this.subtitleText = '';
@@ -1446,7 +1600,32 @@ struct Index {
     this.subtitleMessage = '';
   }
 
-  private async loadSubtitleFromUri(uri: string): Promise<void> {
+  private async clearSubtitle(): Promise<void> {
+    const mediaUri = this.currentMediaItem?.uri ?? '';
+    this.resetSubtitleState();
+    if (mediaUri.length > 0) {
+      await this.storageService.deleteSubtitleBinding(mediaUri);
+    }
+  }
+
+  private async loadRememberedSubtitleForItem(item: MediaItem): Promise<void> {
+    const siblingLoaded = await this.loadBestSiblingSubtitleForItem(item);
+    if (siblingLoaded) {
+      return;
+    }
+
+    const binding = await this.storageService.getSubtitleBinding(item.uri);
+    if (!binding) {
+      return;
+    }
+    this.subtitleOffsetSeconds = binding.offsetSeconds;
+    await this.loadSubtitleFromUri(binding.subtitleUri, false);
+    if (this.subtitleCues.length > 0) {
+      this.subtitleMessage = `已自动加载上次字幕：${binding.subtitleLabel || this.getSubtitleFileName()}`;
+    }
+  }
+
+  private async loadSubtitleFromUri(uri: string, remember: boolean = true): Promise<void> {
     this.subtitleMessage = '正在加载字幕...';
     this.subtitleUri = uri;
     this.subtitleText = '';
@@ -1461,6 +1640,15 @@ struct Index {
       this.currentSubtitleLabel = cues.length > 0 ? '已启用' : '无有效字幕';
       this.subtitleMessage = cues.length > 0 ? `已加载 ${cues.length} 条字幕` : '字幕文件解析成功，但未找到有效字幕条目。';
       this.updateSubtitleRender(this.currentTime);
+      if (remember && this.currentMediaItem && cues.length > 0) {
+        await this.storageService.saveSubtitleBinding({
+          mediaUri: this.currentMediaItem.uri,
+          subtitleUri: uri,
+          subtitleLabel: this.getSubtitleFileName(),
+          offsetSeconds: this.subtitleOffsetSeconds,
+          updatedAt: Date.now()
+        });
+      }
     } catch (err) {
       console.error(`Load subtitle failed: ${err}`);
       this.subtitleCues = [];
@@ -1542,43 +1730,45 @@ struct Index {
   }
 
   private async switchKernel(mode: string): Promise<void> {
-    console.info(`[PlayerSirius][Index][kernel] switch request target=${mode} current=${this.playerKernelMode} policy=${this.kernelSelectionPolicy}`);
-    if (mode === 'auto') {
-      this.kernelSelectionPolicy = 'auto';
-      if (this.currentMediaItem) {
-        const desiredMode = this.getDesiredKernelModeForItem(this.currentMediaItem);
-        if (desiredMode !== this.playerKernelMode) {
-          this.persistCurrentItem();
-          await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
-          this.initializeKernelAttempt(this.currentMediaItem);
-          this.resetPlaybackFlags();
-          this.resetAudioTracks();
-          this.gestureHint = `已切换到自动策略，当前使用 ${this.playerKernelService.getKernelByMode(desiredMode).displayName}`;
-          await this.startPlaybackForCurrentItem();
-          return;
+    await this.runPlaybackTask(async () => {
+      console.info(`[PlayerSirius][Index][kernel] switch request target=${mode} current=${this.playerKernelMode} policy=${this.kernelSelectionPolicy}`);
+      if (mode === 'auto') {
+        this.kernelSelectionPolicy = 'auto';
+        if (this.currentMediaItem) {
+          const desiredMode = this.getDesiredKernelModeForItem(this.currentMediaItem);
+          if (desiredMode !== this.playerKernelMode) {
+            this.persistCurrentItem();
+            await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
+            this.initializeKernelAttempt(this.currentMediaItem);
+            this.resetPlaybackFlags();
+            this.resetAudioTracks();
+            this.gestureHint = `已切换到自动策略，当前使用 ${this.playerKernelService.getKernelByMode(desiredMode).displayName}`;
+            await this.startPlaybackForCurrentItem();
+            return;
+          }
         }
+        this.gestureHint = '已切换到自动解码路径策略';
+        return;
       }
-      this.gestureHint = '已切换到自动解码路径策略';
-      return;
-    }
 
-    if (this.playerKernelMode === mode && this.kernelSelectionPolicy === 'manual') {
-      return;
-    }
+      if (this.playerKernelMode === mode && this.kernelSelectionPolicy === 'manual') {
+        return;
+      }
 
-    this.persistCurrentItem();
-    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
-    this.kernelSelectionPolicy = 'manual';
-    this.playerKernelMode = mode;
-    this.attemptedKernelModes = [mode];
-    this.lastFallbackMessage = '';
-    this.resetPlaybackFlags();
-    this.resetAudioTracks();
-    this.gestureHint = `已切换到 ${this.playerKernelService.getKernelByMode(mode).displayName}`;
+      this.persistCurrentItem();
+      await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
+      this.kernelSelectionPolicy = 'manual';
+      this.playerKernelMode = mode;
+      this.attemptedKernelModes = [mode];
+      this.lastFallbackMessage = '';
+      this.resetPlaybackFlags();
+      this.resetAudioTracks();
+      this.gestureHint = `已切换到 ${this.playerKernelService.getKernelByMode(mode).displayName}`;
 
-    if (this.currentMediaItem) {
-      await this.startPlaybackForCurrentItem();
-    }
+      if (this.currentMediaItem) {
+        await this.startPlaybackForCurrentItem();
+      }
+    });
   }
 
   private async onAVPlayerSurfaceLoad(): Promise<void> {
@@ -1623,6 +1813,7 @@ struct Index {
   }
   private async stopCurrentPlaybackForSwitch(): Promise<void> {
     const startAt = Date.now();
+    this.playbackStartSeq++;
     console.info(`[PlayerSirius][Index][cleanup] stopCurrentPlaybackForSwitch begin mode=${this.playerKernelMode} prepared=${this.isPrepared} playing=${this.isPlaying}`);
     if (this.isUsingNativePlayer()) {
       this.nativePlayerBridgeService.stop();
@@ -1658,7 +1849,7 @@ struct Index {
     if (error.code === 201 || error.code === 202) {
       return '';
     }
-    return '选择视频失败，请稍后重试。';
+    return '选择文件失败，请稍后重试。';
   }
 
   private findExistingMedia(uri: string): MediaItem | null {
@@ -1718,16 +1909,18 @@ struct Index {
   }
 
   private async requestOpenItem(item: MediaItem): Promise<void> {
-    this.persistCurrentItem();
-    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
+    await this.runPlaybackTask(async () => {
+      this.persistCurrentItem();
+      await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
 
-    if (this.shouldPromptResume(item)) {
-      this.pendingOpenItem = this.cloneMediaItem(item);
-      this.showResumePrompt = true;
-      return;
-    }
+      if (this.shouldPromptResume(item)) {
+        this.pendingOpenItem = this.cloneMediaItem(item);
+        this.showResumePrompt = true;
+        return;
+      }
 
-    await this.applyOpenItem(item, true);
+      await this.applyOpenItem(item, true);
+    });
   }
 
   private async applyOpenItem(item: MediaItem, resumeFromHistory: boolean): Promise<void> {
@@ -1744,8 +1937,9 @@ struct Index {
     this.showResumePrompt = false;
     this.initializeKernelAttempt(playable);
     this.resetPlaybackFlags();
-    this.clearSubtitle();
+    this.resetSubtitleState();
     this.resetAudioTracks();
+    await this.loadRememberedSubtitleForItem(playable);
     await this.storageService.savePlayHistory(playable);
     this.updatePlaylist();
     await this.loadCollections();
@@ -1756,21 +1950,83 @@ struct Index {
     if (!this.pendingOpenItem) {
       return;
     }
-    await this.applyOpenItem(this.pendingOpenItem, resumeFromHistory);
+    await this.runPlaybackTask(async () => {
+      if (this.pendingOpenItem) {
+        await this.applyOpenItem(this.pendingOpenItem, resumeFromHistory);
+      }
+    });
   }
 
   private getFileNameFromUri(uri: string): string {
     return MediaItemHelper.getDisplayTitle(uri);
   }
 
+  private createDocumentVideoSelectOptions(maxSelectNumber: number): picker.DocumentSelectOptions {
+    const options = new picker.DocumentSelectOptions();
+    options.maxSelectNumber = maxSelectNumber;
+    options.fileSuffixFilters = [
+      '视频文件(.mp4,.mkv,.avi,.mov,.m3u8,.flv)|.mp4,.mkv,.avi,.mov,.m3u8,.flv',
+      '所有文件(*.*)|.*'
+    ];
+    return options;
+  }
+
+  private getReadableUriError(uri: string): string {
+    try {
+      const file = fs.openSync(uri, fs.OpenMode.READ_ONLY);
+      try {
+        const stat = fs.statSync(file.fd);
+        if (Number(stat.size ?? 0) <= 0 && !uri.toLowerCase().endsWith('.m3u8')) {
+          return '文件为空或无法读取大小';
+        }
+      } finally {
+        fs.closeSync(file);
+      }
+      return '';
+    } catch (err) {
+      const error = err as BusinessError;
+      return error.message ?? `${err}`;
+    }
+  }
+
+  private formatImportFailures(failures: string[]): string {
+    if (failures.length === 0) {
+      return '';
+    }
+    const preview = failures.slice(0, 3).join('；');
+    return failures.length > 3 ? `${preview}；另有 ${failures.length - 3} 个失败` : preview;
+  }
+
   private async selectVideo(): Promise<void> {
     try {
-      const permissionGranted = await this.ensureMediaPermission();
-      if (!permissionGranted) {
-        this.handlePlaybackFailure('需要媒体访问权限后才能选择并播放本地视频。');
+      const documentPicker = new picker.DocumentViewPicker(this.getUiContext());
+      const result = await documentPicker.select(this.createDocumentVideoSelectOptions(1));
+      if (!result || result.length === 0) {
         return;
       }
 
+      const uri = result[0];
+      const item = this.createPlayableItem(uri, this.getFileNameFromUri(uri));
+      await this.storageService.upsertMediaItem(item);
+      await this.loadCollections();
+      await this.requestOpenItem(item);
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`Select file video failed: ${error.code}, ${error.message}`);
+      const message = this.getSelectVideoErrorMessage(error);
+      if (message.length > 0) {
+        this.handlePlaybackFailure(message);
+      }
+    }
+  }
+
+  private async selectGalleryVideo(): Promise<void> {
+    try {
+      const permissionGranted = await this.ensureMediaPermission();
+      if (!permissionGranted) {
+        this.handlePlaybackFailure('需要媒体访问权限后才能从图库选择视频。');
+        return;
+      }
       const photoPicker = new picker.PhotoViewPicker();
       const result = await photoPicker.select({
         MIMEType: picker.PhotoViewMIMETypes.VIDEO_TYPE,
@@ -1786,10 +2042,64 @@ struct Index {
       }
     } catch (err) {
       const error = err as BusinessError;
-      console.error(`Select video failed: ${error.code}, ${error.message}`);
+      console.error(`Select gallery video failed: ${error.code}, ${error.message}`);
       const message = this.getSelectVideoErrorMessage(error);
       if (message.length > 0) {
         this.handlePlaybackFailure(message);
+      }
+    }
+  }
+
+  private async importSelectedVideoFiles(): Promise<void> {
+    try {
+      const documentPicker = new picker.DocumentViewPicker(this.getUiContext());
+      const result = await documentPicker.select(this.createDocumentVideoSelectOptions(MAX_LIBRARY_IMPORT_COUNT));
+      if (!result || result.length === 0) {
+        return;
+      }
+
+      const failures: string[] = [];
+      const readableUris: string[] = [];
+      for (const uri of result) {
+        const error = this.getReadableUriError(uri);
+        if (error.length > 0) {
+          failures.push(`${this.getFileNameFromUri(uri)}：${error}`);
+        } else {
+          readableUris.push(uri);
+        }
+      }
+      if (readableUris.length === 0) {
+        this.libraryMessage = `扫描播放列表没有导入成功。${this.formatImportFailures(failures)}`;
+        return;
+      }
+
+      const items = readableUris.map((uri: string) => {
+        const item = this.createPlayableItem(uri, this.getFileNameFromUri(uri));
+        item.folderName = '扫描播放列表';
+        return item;
+      });
+      await this.storageService.saveMediaLibraryItems(items);
+      const failureMessage = this.formatImportFailures(failures);
+      this.libraryMessage = failures.length > 0
+        ? `扫描播放列表导入 ${items.length} 个视频，${failures.length} 个失败：${failureMessage}`
+        : `扫描播放列表已导入 ${items.length} 个视频。`;
+      await this.loadCollections();
+      await this.ensureLibraryThumbnails();
+      this.activeHomeSection = 'folders';
+      this.selectedFolderName = '扫描播放列表';
+      const firstItem = this.playerService.setPlaylist(items, 0);
+      this.updatePlaylist();
+      if (firstItem) {
+        await this.requestOpenItem(firstItem);
+      }
+    } catch (err) {
+      const error = err as BusinessError;
+      console.error(`Import selected video files failed: ${error.code}, ${error.message}`);
+      const message = this.getSelectVideoErrorMessage(error);
+      if (message.length > 0) {
+        this.libraryMessage = message;
+      } else {
+        this.libraryMessage = '批量导入视频失败，请稍后重试。';
       }
     }
   }
@@ -1811,15 +2121,7 @@ struct Index {
           await this.storageService.saveLibraryImportRoot(scanResult.rootUri);
         }
       } else {
-        const photoPicker = new picker.PhotoViewPicker();
-        const result = await photoPicker.select({
-          MIMEType: picker.PhotoViewMIMETypes.VIDEO_TYPE,
-          maxSelectNumber: MAX_LIBRARY_IMPORT_COUNT
-        });
-        uris = result.photoUris ?? [];
-        if (scanResult.message.length > 0 && uris.length > 0) {
-          this.libraryMessage = `${scanResult.message}，已回退到批量导入 ${uris.length} 个视频。`;
-        }
+        this.libraryMessage = scanResult.message.length > 0 ? scanResult.message : '未在所选文件夹中发现可导入视频。';
       }
 
       if (uris.length === 0) {
@@ -1833,7 +2135,7 @@ struct Index {
       });
       await this.storageService.saveMediaLibraryItems(items);
       if (this.libraryMessage.length === 0) {
-        this.libraryMessage = `已导入 ${items.length} 个本地媒体，可在媒体库和文件夹视图中浏览。`;
+        this.libraryMessage = `扫描播放列表已导入 ${items.length} 个视频，可在媒体库和片单视图中浏览。`;
       }
       await this.loadCollections();
       await this.ensureLibraryThumbnails();
@@ -1850,7 +2152,7 @@ struct Index {
     try {
       const roots = await this.storageService.getLibraryImportRoots();
       if (roots.length === 0) {
-        this.libraryMessage = '当前没有已记住的扫描目录，请先使用“扫描媒体库”导入文件夹。';
+        this.libraryMessage = '当前没有已记住的扫描目录，请先使用“扫描播放列表”导入。';
         return;
       }
       this.libraryMessage = '正在重新扫描已记住的媒体目录...';
@@ -1912,6 +2214,28 @@ struct Index {
     await this.requestOpenItem(item);
   }
 
+  private async playFolderAsPlaylist(folderName: string): Promise<void> {
+    const items = this.libraryItems.filter((item: MediaItem) => {
+      if (folderName === ALL_FOLDERS_LABEL) {
+        return true;
+      }
+      return item.folderName === folderName;
+    });
+    if (items.length === 0) {
+      this.libraryMessage = '这个片单里还没有可播放的视频。';
+      return;
+    }
+
+    this.selectedFolderName = folderName;
+    this.activeLibraryTab = 'folders';
+    const firstItem = this.playerService.setPlaylist(items, 0);
+    this.updatePlaylist();
+    this.showLibrary = false;
+    if (firstItem) {
+      await this.requestOpenItem(firstItem);
+    }
+  }
+
   private async activatePlaylistItem(item: MediaItem | null): Promise<void> {
     if (!item) {
       this.updatePlaylist();
@@ -1924,8 +2248,9 @@ struct Index {
     this.networkUrl = item.sourceType === 'network' ? item.uri : this.networkUrl;
     this.initializeKernelAttempt(item);
     this.resetPlaybackFlags();
-    this.clearSubtitle();
+    this.resetSubtitleState();
     this.resetAudioTracks();
+    await this.loadRememberedSubtitleForItem(item);
     await this.storageService.savePlayHistory(item);
     this.updatePlaylist();
     await this.loadCollections();
@@ -1933,23 +2258,29 @@ struct Index {
   }
 
   private async playFromPlaylist(index: number): Promise<void> {
-    this.persistCurrentItem();
-    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
-    const item = this.playerService.selectByIndex(index);
-    await this.activatePlaylistItem(item);
-    this.showPlaylist = false;
+    await this.runPlaybackTask(async () => {
+      this.persistCurrentItem();
+      await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
+      const item = this.playerService.selectByIndex(index);
+      await this.activatePlaylistItem(item);
+      this.showPlaylist = false;
+    });
   }
 
   private async playNext(): Promise<void> {
-    this.persistCurrentItem();
-    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
-    await this.activatePlaylistItem(this.playerService.playNext());
+    await this.runPlaybackTask(async () => {
+      this.persistCurrentItem();
+      await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
+      await this.activatePlaylistItem(this.playerService.playNext());
+    });
   }
 
   private async playPrevious(): Promise<void> {
-    this.persistCurrentItem();
-    await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
-    await this.activatePlaylistItem(this.playerService.playPrevious());
+    await this.runPlaybackTask(async () => {
+      this.persistCurrentItem();
+      await this.enqueueCleanup(() => this.stopCurrentPlaybackForSwitch());
+      await this.activatePlaylistItem(this.playerService.playPrevious());
+    });
   }
 
   private changeSpeed(speed: number): void {
@@ -2172,6 +2503,28 @@ struct Index {
     return this.libraryItems;
   }
 
+  onBackPress(): boolean {
+    if (this.isLandscapeMode) {
+      this.isLandscapeMode = false;
+      this.setPreferredOrientation(window.Orientation.PORTRAIT);
+      return true;
+    }
+    if (this.showRemotePanel || this.showCastingPanel || this.showMediaInfo || this.showTrackPanel ||
+      this.showPlaylist || this.showHistory || this.showLibrary || this.showSpeedPicker || this.showResumePrompt) {
+      this.showRemotePanel = false;
+      this.showCastingPanel = false;
+      this.showMediaInfo = false;
+      this.showTrackPanel = false;
+      this.showPlaylist = false;
+      this.showHistory = false;
+      this.showLibrary = false;
+      this.showSpeedPicker = false;
+      this.showResumePrompt = false;
+      return true;
+    }
+    return false;
+  }
+
   build() {
     Column() {
       if (this.currentMediaItem) {
@@ -2283,28 +2636,116 @@ struct Index {
               .margin({ bottom: 52 })
               .width('92%');
           }
+
+          Column() {
+            Row() {
+              Text(this.formatTime(this.currentTime))
+                .fontSize(12)
+                .fontColor(Color.White)
+                .width(46);
+
+              Slider({
+                value: this.currentTime,
+                min: 0,
+                max: this.duration > 0 ? this.duration : 1,
+                step: 1,
+                style: SliderStyle.OutSet
+              })
+                .layoutWeight(1)
+                .enabled(this.isPrepared)
+                .blockColor(UI.brand)
+                .trackColor('#66FFFFFF')
+                .selectedColor(UI.brandStrong)
+                .onChange((value: number) => {
+                  this.onSliderChange(value);
+                })
+                .onTouch((event: TouchEvent) => {
+                  this.onSliderTouch(event);
+                });
+
+              Text(this.formatTime(this.duration))
+                .fontSize(12)
+                .fontColor(Color.White)
+                .textAlign(TextAlign.End)
+                .width(46);
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center);
+
+            Row() {
+              Button('<<')
+                .width(44)
+                .height(34)
+                .enabled(this.playlistItems.length > 1)
+                .onClick(() => {
+                  this.playPrevious();
+                });
+
+              Button(this.isPlaying ? '暂停' : '播放')
+                .height(34)
+                .layoutWeight(1)
+                .margin({ left: 8, right: 8 })
+                .enabled(this.isPrepared)
+                .onClick(() => {
+                  this.togglePlay();
+                });
+
+              Button('>>')
+                .width(44)
+                .height(34)
+                .enabled(this.playlistItems.length > 1)
+                .onClick(() => {
+                  this.playNext();
+                });
+
+              Button(this.isLandscapeMode ? '竖' : '横')
+                .width(44)
+                .height(34)
+                .margin({ left: 8 })
+                .onClick(() => {
+                  this.toggleOrientation();
+                });
+            }
+            .width('100%')
+            .margin({ top: 8 });
+          }
+          .width('100%')
+          .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+          .backgroundColor('#88000000');
         }
         .gesture(
-          PanGesture()
-            .onActionUpdate((event: GestureEvent) => {
-              if (Math.abs(event.offsetX) >= Math.abs(event.offsetY)) {
-                this.adjustProgress(event.offsetX > 0 ? 3 : -3);
-              } else {
-                const centerX = Number(event.fingerList && event.fingerList.length > 0 ? event.fingerList[0].globalX : 0);
-                if (centerX > 0 && centerX < 180) {
-                  this.adjustBrightness(event.offsetY < 0 ? 0.02 : -0.02);
-                } else {
-                  this.adjustVolume(event.offsetY < 0 ? 0.02 : -0.02);
+          GestureGroup(GestureMode.Parallel,
+            TapGesture({ count: 1 })
+              .onAction(() => {
+                if (this.isPrepared) {
+                  this.togglePlay();
                 }
-              }
-            })
-            .onActionEnd(() => {
-              this.persistCurrentItem();
-            })
+              }),
+            LongPressGesture()
+              .onAction(() => {
+                this.showTrackPanel = true;
+              }),
+            PanGesture()
+              .onActionUpdate((event: GestureEvent) => {
+                if (Math.abs(event.offsetX) >= Math.abs(event.offsetY)) {
+                  this.adjustProgress(event.offsetX > 0 ? 5 : -5);
+                } else {
+                  const centerX = Number(event.fingerList && event.fingerList.length > 0 ? event.fingerList[0].globalX : 0);
+                  if (centerX > 0 && centerX < 180) {
+                    this.adjustBrightness(event.offsetY < 0 ? 0.03 : -0.03);
+                  } else {
+                    this.adjustVolume(event.offsetY < 0 ? 0.03 : -0.03);
+                  }
+                }
+              })
+              .onActionEnd(() => {
+                this.persistCurrentItem();
+              })
+          )
         );
       } else {
         Column() {
-          Text('请选择本地视频或输入网络地址')
+          Text('选择文件、图库视频或网络地址')
             .fontSize(18)
             .fontColor(UI.textSecondary);
 
@@ -2330,7 +2771,7 @@ struct Index {
               });
           }
 
-          Button('选择视频')
+          Button('选择文件')
             .width(150)
             .height(40)
             .borderRadius(UI_RADIUS.control)
@@ -2341,7 +2782,18 @@ struct Index {
               this.selectVideo();
             });
 
-          Button('扫描媒体库')
+          Button('图库视频')
+            .width(150)
+            .height(40)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
+            .margin({ top: 12 })
+            .onClick(() => {
+              this.selectGalleryVideo();
+            });
+
+          Button('扫描播放列表')
             .width(150)
             .height(40)
             .borderRadius(UI_RADIUS.control)
@@ -2351,6 +2803,17 @@ struct Index {
             .onClick(() => {
               this.importMediaLibrary();
             });
+
+          Button('选择多文件')
+            .width(150)
+            .height(40)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
+            .margin({ top: 12 })
+            .onClick(() => {
+              this.importSelectedVideoFiles();
+            });
         }
         .width('100%')
         .height(300)
@@ -2359,633 +2822,20 @@ struct Index {
       }
 
       Column() {
-        Text('快捷操作')
-          .fontSize(13)
-          .fontColor(UI.textSecondary)
-          .width('100%')
-          .margin({ bottom: 8 });
+        this.HomeMessagesBuilder();
+        this.HomeNavigationBuilder();
 
-        if (this.currentMediaItem) {
-          Text(this.currentMediaItem.title)
-            .fontSize(16)
-            .fontWeight(FontWeight.Medium)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-            .margin({ bottom: 10 });
+        if (this.activeHomeSection === 'videos') {
+          this.HomeVideosBuilder();
+        } else if (this.activeHomeSection === 'network') {
+          this.HomeNetworkBuilder();
+        } else if (this.activeHomeSection === 'folders') {
+          this.HomeFoldersBuilder();
+        } else {
+          this.HomePlaybackBuilder();
         }
 
-        Row() {
-          Button('选择视频')
-            .fontSize(14)
-            .height(36)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.brand)
-            .fontColor(Color.White)
-            .onClick(() => {
-              this.selectVideo();
-            });
-
-          Button('媒体库')
-            .fontSize(14)
-            .height(36)
-            .margin({ left: 10 })
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.activeLibraryTab = 'library';
-              this.showLibrary = true;
-            });
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.Start);
-
-        Row() {
-          Button('扫描媒体库')
-            .fontSize(14)
-            .height(36)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.importMediaLibrary();
-            });
-
-          Button('重扫目录')
-            .fontSize(14)
-            .height(36)
-            .margin({ left: 10 })
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.rescanTrackedLibraryRoots();
-            });
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.Start)
-        .margin({ top: 10, bottom: 12 });
-
-        Text('播放内核')
-          .fontSize(13)
-          .fontColor(UI.textSecondary)
-          .width('100%')
-          .margin({ bottom: 8 });
-
-        Row() {
-          Button('自动')
-            .fontSize(12)
-            .height(32)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(this.kernelSelectionPolicy === 'auto' ? UI.brand : UI.softBg2)
-            .fontColor(this.kernelSelectionPolicy === 'auto' ? Color.White : UI.textPrimary)
-            .onClick(() => {
-              this.switchKernel('auto');
-            });
-
-          Text(this.getKernelStatusText())
-            .fontSize(12)
-            .fontColor(UI.textSecondary)
-            .margin({ left: 12 })
-            .layoutWeight(1);
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-        .margin({ bottom: 8 });
-
-        Row() {
-          Button('ArkUI Video')
-            .fontSize(12)
-            .height(32)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(this.playerKernelMode === 'video-component' ? UI.brand : UI.softBg2)
-            .fontColor(this.playerKernelMode === 'video-component' ? Color.White : UI.textPrimary)
-            .onClick(() => {
-              this.switchKernel('video-component');
-            });
-
-          Button('AVPlayer')
-            .fontSize(12)
-            .height(32)
-            .margin({ left: 8 })
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(this.playerKernelMode === 'avplayer-native' ? UI.brand : UI.softBg2)
-            .fontColor(this.playerKernelMode === 'avplayer-native' ? Color.White : UI.textPrimary)
-            .onClick(() => {
-              this.switchKernel('avplayer-native');
-            });
-
-          Button('Native')
-            .fontSize(12)
-            .height(32)
-            .margin({ left: 8 })
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(this.playerKernelMode === 'native-bridge' ? UI.brand : UI.softBg2)
-            .fontColor(this.playerKernelMode === 'native-bridge' ? Color.White : UI.textPrimary)
-            .onClick(() => {
-              this.switchKernel('native-bridge');
-            });
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-        .margin({ bottom: 12 });
-
-        Row() {
-          Button('历史记录')
-            .fontSize(14)
-            .height(34)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.showHistory = true;
-            });
-
-          Button('播放列表')
-            .fontSize(14)
-            .margin({ left: 10 })
-            .height(34)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.updatePlaylist();
-              this.showPlaylist = true;
-            });
-
-          Button(this.currentMediaItem?.isFavorite ? '取消收藏' : '收藏')
-            .fontSize(14)
-            .margin({ left: 10 })
-            .height(34)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .enabled(!!this.currentMediaItem)
-            .onClick(() => {
-              if (this.currentMediaItem) {
-                this.toggleFavorite(this.currentMediaItem);
-              }
-            });
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.Start)
-        .margin({ bottom: 12 });
-
-        Row() {
-          Button(this.isLandscapeMode ? '竖屏' : '横屏')
-            .fontSize(14)
-            .height(34)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.toggleOrientation();
-            });
-
-          Button(`画面${this.getScaleModeLabel()}`)
-            .fontSize(14)
-            .margin({ left: 10 })
-            .height(34)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.cycleFitMode();
-            });
-
-          Button('旋转画面')
-            .fontSize(14)
-            .margin({ left: 10 })
-            .height(34)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.rotateVideo();
-            });
-
-          Button('字幕/音轨')
-            .fontSize(14)
-            .margin({ left: 10 })
-            .height(34)
-            .borderRadius(UI_RADIUS.control)
-            .backgroundColor(UI.softBg2)
-            .fontColor(UI.textPrimary)
-            .onClick(() => {
-              this.showTrackPanel = true;
-            });
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.Start)
-        .margin({ bottom: 12 });
-
-        if (this.errorMessage.length > 0) {
-          Text(this.errorMessage)
-            .fontSize(13)
-            .fontColor(UI.danger)
-            .width('100%')
-            .margin({ bottom: 12 });
-        }
-
-        if (this.lastFallbackMessage.length > 0) {
-          Text(this.lastFallbackMessage)
-            .fontSize(12)
-            .fontColor(UI.brandStrong)
-            .width('100%')
-            .margin({ bottom: 12 });
-        }
-
-        if (this.libraryMessage.length > 0) {
-          Text(this.libraryMessage)
-            .fontSize(12)
-            .fontColor(UI.brandStrong)
-            .width('100%')
-            .margin({ bottom: 12 });
-        }
-
-        if (this.showPermissionGuide) {
-          Row() {
-            Text('媒体访问权限未开启')
-              .fontSize(13)
-              .fontColor('#B45309');
-
-            Button('去授权')
-              .fontSize(12)
-              .margin({ left: 12 })
-              .onClick(async () => {
-                const granted = await this.ensureMediaPermission(true);
-                if (granted) {
-                  this.errorMessage = '';
-                }
-              });
-          }
-          .width('100%')
-          .margin({ bottom: 12 });
-        }
-
-        Column() {
-          Row() {
-            Text('网络播放')
-              .fontSize(14)
-              .fontWeight(FontWeight.Medium)
-              .layoutWeight(1);
-
-            Button(this.showNetworkInput ? '收起' : '展开')
-              .fontSize(12)
-              .height(30)
-              .borderRadius(UI_RADIUS.control)
-              .backgroundColor(UI.softBg2)
-              .fontColor(UI.textPrimary)
-              .onClick(() => {
-                this.showNetworkInput = !this.showNetworkInput;
-              });
-
-            Button('WebDAV')
-              .fontSize(12)
-              .margin({ left: 8 })
-              .height(30)
-              .borderRadius(UI_RADIUS.control)
-              .backgroundColor(UI.softBg2)
-              .fontColor(UI.textPrimary)
-              .onClick(() => {
-                this.showRemotePanel = true;
-              });
-
-            Button('投屏')
-              .fontSize(12)
-              .margin({ left: 8 })
-              .height(30)
-              .borderRadius(UI_RADIUS.control)
-              .backgroundColor(UI.softBg2)
-              .fontColor(UI.textPrimary)
-              .onClick(() => {
-                this.showCastingPanel = true;
-                this.refreshDlnaStatus(false);
-                this.startDlnaPolling();
-              });
-          }
-          .width('100%');
-
-          if (this.showNetworkInput) {
-            TextInput({ text: this.networkUrl, placeholder: '输入 HTTP/HTTPS 或 m3u8 地址' })
-              .width('100%')
-              .margin({ top: 10 })
-              .backgroundColor(UI.softBg2)
-              .borderRadius(UI_RADIUS.control)
-              .onChange((value: string) => {
-                this.networkUrl = value;
-              });
-
-            Row() {
-              Button('打开链接')
-                .fontSize(14)
-                .height(34)
-                .borderRadius(UI_RADIUS.control)
-                .backgroundColor(UI.brand)
-                .fontColor(Color.White)
-                .onClick(() => {
-                  this.openNetworkMedia();
-                });
-
-              Button('HLS 示例')
-                .fontSize(14)
-                .margin({ left: 10 })
-                .height(34)
-                .borderRadius(UI_RADIUS.control)
-                .backgroundColor(UI.softBg2)
-                .fontColor(UI.textPrimary)
-                .onClick(() => {
-                  this.networkUrl = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
-                });
-            }
-            .margin({ top: 10 });
-          }
-        }
-        .width('100%')
-        .padding(12)
-        .borderRadius(UI_RADIUS.control)
-        .backgroundColor(UI.softBg)
-        .border({ width: 1, color: UI.cardBorder })
-        .margin({ bottom: 12 });
-
-        if (this.currentMediaItem) {
-          Column() {
-            Row() {
-              Text('媒体元数据')
-                .fontSize(14)
-                .fontWeight(FontWeight.Medium)
-                .layoutWeight(1);
-
-              Button('信息面板')
-                .fontSize(12)
-                .onClick(() => {
-                  this.showMediaInfo = true;
-                });
-            }
-            .width('100%')
-            .margin({ bottom: 8 });
-
-            Text(`当前内核：${this.getKernelStatusText()}`)
-              .fontSize(14)
-              .width('100%');
-            Text(`解码路径：${this.kernelSelectionPolicy === 'auto' ? '自动选择，失败可回退' : '手动指定，失败仍允许自动回退一次'}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-
-            Text(`来源：${this.currentMediaItem.sourceType === 'network' ? '网络流' : '本地文件'}`)
-              .fontSize(12)
-              .width('100%');
-            Text(`文件夹：${this.currentMediaItem.folderName}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`时长：${this.formatTime(this.duration)}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`进度：${this.formatTime(this.currentTime)} / ${this.formatTime(this.duration)}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`状态：${this.currentMediaItem.isCompleted || this.isCompleted ? '已完成' : '未完成'}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`最近播放：${this.formatDateTime(this.currentMediaItem.lastPlayedAt)}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`播放次数：${this.currentMediaItem.playCount}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`音量：${this.getVolumeDisplayText()} · 字幕：${this.currentSubtitleLabel} · 音轨：${this.currentAudioTrack}`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`亮度：${this.getBrightnessDisplayText()} · 手势：左亮度 / 右音量 / 横向进度`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            Text(`首帧：${this.firstFrameCostMs > 0 ? `${this.firstFrameCostMs}ms` : '--'} · 缓冲：${this.bufferPercent}% · 已缓存：${this.cachedDurationSeconds}s`)
-              .fontSize(12)
-              .width('100%')
-              .margin({ top: 4 });
-            if (this.availableBitrates.length > 0) {
-              Text(`HLS 码率档位：${this.availableBitrates.length} 个`)
-                .fontSize(12)
-                .width('100%')
-                .margin({ top: 4 });
-            }
-          }
-          .width('100%')
-          .padding(12)
-          .borderRadius(12)
-          .backgroundColor('#F9FAFB')
-          .margin({ bottom: 12 });
-        }
-
-        Column() {
-          Text('手势快调')
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .width('100%');
-
-          Text('在画面区域横向滑动快进/快退，纵向滑动调节音量；也可使用下面的快捷按钮。')
-            .fontSize(12)
-            .fontColor(UI.textSecondary)
-            .width('100%')
-            .margin({ top: 4 });
-
-          Row() {
-            Button(this.getVolumeDownLabel())
-              .fontSize(12)
-              .onClick(() => {
-                this.adjustVolume(-0.1);
-              });
-
-            Button(this.getVolumeUpLabel())
-              .fontSize(12)
-              .margin({ left: 8 })
-              .onClick(() => {
-                this.adjustVolume(0.1);
-              });
-
-            Button('-10秒')
-              .fontSize(12)
-              .margin({ left: 8 })
-              .onClick(() => {
-                this.adjustProgress(-10);
-              });
-
-            Button('+10秒')
-              .fontSize(12)
-              .margin({ left: 8 })
-              .onClick(() => {
-                this.adjustProgress(10);
-              });
-          }
-          .width('100%')
-          .margin({ top: 10 });
-        }
-        .width('100%')
-        .padding(12)
-        .borderRadius(UI_RADIUS.control)
-        .backgroundColor(UI.softBg)
-        .border({ width: 1, color: UI.cardBorder })
-        .margin({ bottom: 12 });
-
-        Row() {
-          Button('|<')
-            .width(50)
-            .enabled(this.playlistItems.length > 1)
-            .onClick(() => {
-              this.playPrevious();
-            });
-
-          Button(this.isPlaying ? '暂停' : '播放')
-            .width(80)
-            .margin({ left: 10, right: 10 })
-            .enabled(this.isPrepared)
-            .onClick(() => {
-              this.togglePlay();
-            });
-
-          Button('>|')
-            .width(50)
-            .enabled(this.playlistItems.length > 1)
-            .onClick(() => {
-              this.playNext();
-            });
-
-          Button('停止')
-            .width(60)
-            .margin({ left: 10 })
-            .enabled(this.isPrepared)
-            .onClick(() => {
-              this.stopPlayback();
-            });
-
-          Blank()
-            .layoutWeight(1);
-
-          Button(`${this.currentSpeed}x`)
-            .width(70)
-            .margin({ left: 10, right: 10 })
-            .onClick(() => {
-              this.showSpeedPicker = true;
-            });
-        }
-        .margin({ bottom: 15 });
-
-        if (this.hasPlayableError) {
-          Row() {
-            Button('重试')
-              .width(90)
-              .onClick(() => {
-                this.retryCurrent();
-              });
-
-            Button('重新选择')
-              .width(110)
-              .margin({ left: 12 })
-              .onClick(() => {
-                this.selectVideo();
-              });
-          }
-          .width('100%')
-          .margin({ bottom: 12 });
-        }
-
-        if (this.isCompleted) {
-          Row() {
-            Button('重播')
-              .width(90)
-              .onClick(() => {
-                this.replayCurrent();
-              });
-
-            Button('下一项')
-              .width(110)
-              .margin({ left: 12 })
-              .enabled(this.playlistItems.length > 1)
-              .onClick(() => {
-                this.playNext();
-              });
-          }
-          .width('100%')
-          .margin({ bottom: 12 });
-        }
-
-        Row() {
-          Text(this.formatTime(this.currentTime))
-            .fontSize(13)
-            .width(48);
-
-          Slider({
-            value: this.currentTime,
-            min: 0,
-            max: this.duration > 0 ? this.duration : 1,
-            step: 1,
-            style: SliderStyle.OutSet
-          })
-            .layoutWeight(1)
-            .margin({ left: 12, right: 12 })
-            .enabled(this.isPrepared)
-            .blockColor('#007DFF')
-            .trackColor('#D1D5DB')
-            .selectedColor('#2563EB')
-            .onChange((value: number) => {
-              this.onSliderChange(value);
-            })
-            .onTouch((event: TouchEvent) => {
-              this.onSliderTouch(event);
-            });
-
-          Text(this.formatTime(this.duration))
-            .fontSize(13)
-            .width(48);
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-        .margin({ bottom: 12 });
-
-        Text(this.getPlaybackStatusText())
-          .fontSize(13)
-          .fontColor(this.isPlaying ? '#007DFF' : '#666666')
-          .width('100%');
-
-        if (this.isLoading) {
-          Text('正在加载媒体信息...')
-            .fontSize(12)
-            .fontColor('#666666')
-            .width('100%')
-            .margin({ top: 6 });
-        }
-
-        if (this.isBuffering) {
-          Text(`正在缓冲... ${this.bufferPercent}% · 预计已缓存 ${this.cachedDurationSeconds}s`)
-            .fontSize(12)
-            .fontColor(UI.warning)
-            .width('100%')
-            .margin({ top: 6 });
-        }
-
-        if (this.weakNetHint.length > 0) {
-          Text(this.weakNetHint)
-            .fontSize(12)
-            .fontColor('#D97706')
-            .width('100%')
-            .margin({ top: 6 });
-        }
-
-        Text('当前已补充横竖屏、画面比例/旋转、滑动快调和信息面板；字幕、多音轨、后台播放等高级能力仍建议切换到 AVPlayer 或 Native 内核。')
-          .fontSize(11)
-          .fontColor(UI.textSecondary)
-          .width('100%')
-          .margin({ top: 12 });
+        this.HomeMiniPlayerBuilder();
       }
       .width('100%')
       .padding(UI_SPACING.cardPadding)
@@ -3061,6 +2911,831 @@ struct Index {
         this.stopDlnaPolling();
       }
     });
+  }
+
+  @Builder
+  HomeMessagesBuilder() {
+    Column() {
+      if (this.errorMessage.length > 0) {
+        Text(this.errorMessage)
+          .fontSize(13)
+          .fontColor(UI.danger)
+          .width('100%')
+          .margin({ bottom: 8 });
+      }
+
+      if (this.lastFallbackMessage.length > 0) {
+        Text(this.lastFallbackMessage)
+          .fontSize(12)
+          .fontColor(UI.brandStrong)
+          .width('100%')
+          .margin({ bottom: 8 });
+      }
+
+      if (this.libraryMessage.length > 0) {
+        Text(this.libraryMessage)
+          .fontSize(12)
+          .fontColor(UI.brandStrong)
+          .width('100%')
+          .margin({ bottom: 8 });
+      }
+
+      if (this.showPermissionGuide) {
+        Row() {
+          Column() {
+            Text('需要媒体访问权限')
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(UI.warning)
+              .width('100%');
+            Text('授权后才能导入本地视频和扫描播放列表。')
+              .fontSize(12)
+              .fontColor(UI.textSecondary)
+              .width('100%')
+              .margin({ top: 2 });
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start);
+
+          Button('去授权')
+            .fontSize(12)
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.warning)
+            .fontColor(Color.White)
+            .onClick(async () => {
+              const granted = await this.ensureMediaPermission(true);
+              if (granted) {
+                this.errorMessage = '';
+              }
+            });
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+        .backgroundColor('#FFF7ED')
+        .borderRadius(UI_RADIUS.control)
+        .margin({ bottom: 12 });
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start);
+  }
+
+  @Builder
+  HomeNavigationBuilder() {
+    Column() {
+      Row() {
+        Text('Player Sirius')
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(UI.textPrimary)
+          .layoutWeight(1);
+
+        Button('文件')
+          .width(56)
+          .height(34)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.brand)
+          .fontColor(Color.White)
+          .onClick(() => {
+            this.selectVideo();
+          });
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .margin({ bottom: 12 });
+
+      Row() {
+        Button('视频')
+          .fontSize(13)
+          .height(36)
+          .layoutWeight(1)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.activeHomeSection === 'videos' ? UI.textPrimary : UI.softBg2)
+          .fontColor(this.activeHomeSection === 'videos' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.activeHomeSection = 'videos';
+          });
+
+        Button('网络')
+          .fontSize(13)
+          .height(36)
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.activeHomeSection === 'network' ? UI.textPrimary : UI.softBg2)
+          .fontColor(this.activeHomeSection === 'network' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.activeHomeSection = 'network';
+          });
+
+        Button('片单')
+          .fontSize(13)
+          .height(36)
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.activeHomeSection === 'folders' ? UI.textPrimary : UI.softBg2)
+          .fontColor(this.activeHomeSection === 'folders' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.activeHomeSection = 'folders';
+          });
+
+        Button('播放')
+          .fontSize(13)
+          .height(36)
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.activeHomeSection === 'playback' ? UI.textPrimary : UI.softBg2)
+          .fontColor(this.activeHomeSection === 'playback' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.activeHomeSection = 'playback';
+          });
+      }
+      .width('100%')
+      .margin({ bottom: 16 });
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start);
+  }
+
+  @Builder
+  HomeVideosBuilder() {
+    Column() {
+      Row() {
+        Column() {
+          Text('媒体库')
+            .fontSize(18)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(UI.textPrimary)
+            .width('100%');
+          Text(`${this.libraryItems.length} 个视频 · ${this.historyItems.length} 条历史`)
+            .fontSize(12)
+            .fontColor(UI.textSecondary)
+            .width('100%')
+            .margin({ top: 2 });
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start);
+
+        Button('扫描')
+          .fontSize(12)
+          .height(32)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.importSelectedVideoFiles();
+          });
+      }
+      .width('100%')
+      .margin({ bottom: 12 });
+
+      if (this.getVisibleLibraryItems().length === 0) {
+        Column() {
+          Text('还没有媒体')
+            .fontSize(18)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(UI.textPrimary)
+            .margin({ bottom: 6 });
+          Text('从文件系统选择视频立即播放；扫描播放列表会导入可读视频并提示失败项。')
+            .fontSize(13)
+            .fontColor(UI.textSecondary)
+            .textAlign(TextAlign.Center)
+            .margin({ left: 24, right: 24, bottom: 18 });
+          Row() {
+            Button('选文件')
+              .fontSize(14)
+              .height(38)
+              .layoutWeight(1)
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.brand)
+              .fontColor(Color.White)
+              .onClick(() => {
+                this.selectVideo();
+              });
+            Button('扫描')
+              .fontSize(14)
+              .height(38)
+              .layoutWeight(1)
+              .margin({ left: 10 })
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg2)
+              .fontColor(UI.textPrimary)
+              .onClick(() => {
+                this.importSelectedVideoFiles();
+              });
+            Button('图库')
+              .fontSize(14)
+              .height(38)
+              .layoutWeight(1)
+              .margin({ left: 10 })
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg2)
+              .fontColor(UI.textPrimary)
+              .onClick(() => {
+                this.selectGalleryVideo();
+              });
+          }
+          .width('88%');
+          Row() {
+            Button('文件夹')
+              .fontSize(14)
+              .height(38)
+              .layoutWeight(1)
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg2)
+              .fontColor(UI.textPrimary)
+              .onClick(() => {
+                this.importMediaLibrary();
+              });
+          }
+          .width('88%')
+          .margin({ top: 10 });
+        }
+        .width('100%')
+        .height(220)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(UI.softBg)
+        .borderRadius(UI_RADIUS.control);
+      } else {
+        List({ space: 8 }) {
+          ForEach(this.getVisibleLibraryItems().slice(0, 8), (item: MediaItem) => {
+            ListItem() {
+              this.MediaRowBuilder(item);
+            }
+          }, (item: MediaItem) => item.id);
+        }
+        .width('100%')
+        .height(360);
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .margin({ bottom: 14 });
+  }
+
+  @Builder
+  MediaRowBuilder(item: MediaItem) {
+    Row() {
+      if (item.thumbnailUri && item.thumbnailUri.length > 0) {
+        Image(item.thumbnailUri)
+          .width(96)
+          .height(58)
+          .borderRadius(6)
+          .objectFit(ImageFit.Cover)
+          .margin({ right: 12 });
+      } else {
+        Row() {
+          Text('▶')
+            .fontSize(18)
+            .fontColor(UI.textSecondary);
+        }
+        .width(96)
+        .height(58)
+        .borderRadius(6)
+        .backgroundColor('#E5E7EB')
+        .justifyContent(FlexAlign.Center)
+        .margin({ right: 12 });
+      }
+
+      Column() {
+        Text(item.title)
+          .fontSize(15)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(UI.textPrimary)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%');
+        Text(`${this.getSourceDetailText(item)} · ${item.isCompleted ? '已看完' : this.formatTime(item.lastPosition)}`)
+          .fontSize(12)
+          .fontColor(UI.textSecondary)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .margin({ top: 4 });
+        Text(this.formatDateTime(item.lastPlayedAt))
+          .fontSize(11)
+          .fontColor(UI.textSecondary)
+          .width('100%')
+          .margin({ top: 3 });
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start);
+
+      Button(item.isFavorite ? '★' : '☆')
+        .width(34)
+        .height(34)
+        .borderRadius(UI_RADIUS.control)
+        .backgroundColor(UI.softBg2)
+        .fontColor(item.isFavorite ? '#F59E0B' : UI.textSecondary)
+        .onClick(() => {
+          this.toggleFavorite(item);
+        });
+    }
+    .width('100%')
+    .padding({ left: 10, right: 10, top: 10, bottom: 10 })
+    .backgroundColor(UI.softBg)
+    .borderRadius(UI_RADIUS.control)
+    .onClick(() => {
+      this.openFromLibrary(item);
+    });
+  }
+
+  @Builder
+  HomeNetworkBuilder() {
+    Column() {
+      Text('打开网络媒体')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(UI.textPrimary)
+        .width('100%')
+        .margin({ bottom: 10 });
+
+      TextInput({ text: this.networkUrl, placeholder: 'HTTP / HTTPS / HLS 地址' })
+        .width('100%')
+        .height(42)
+        .backgroundColor(UI.softBg2)
+        .borderRadius(UI_RADIUS.control)
+        .onChange((value: string) => {
+          this.networkUrl = value;
+        });
+
+      Row() {
+        Button('打开')
+          .fontSize(14)
+          .height(38)
+          .layoutWeight(1)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.brand)
+          .fontColor(Color.White)
+          .onClick(() => {
+            this.openNetworkMedia();
+          });
+
+        Button('HLS 示例')
+          .fontSize(14)
+          .height(38)
+          .layoutWeight(1)
+          .margin({ left: 10 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.networkUrl = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
+          });
+      }
+      .width('100%')
+      .margin({ top: 10, bottom: 16 });
+
+      Text('网络位置')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(UI.textPrimary)
+        .width('100%')
+        .margin({ bottom: 8 });
+
+      Row() {
+        Column() {
+          Text('WebDAV / FTP / SMB')
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(UI.textPrimary)
+            .width('100%');
+          Text('浏览远端目录')
+            .fontSize(12)
+            .fontColor(UI.textSecondary)
+            .width('100%')
+            .margin({ top: 3 });
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start);
+        Text('›')
+          .fontSize(24)
+          .fontColor(UI.textSecondary);
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 12, bottom: 12 })
+      .backgroundColor(UI.softBg)
+      .borderRadius(UI_RADIUS.control)
+      .margin({ bottom: 8 })
+      .onClick(() => {
+        this.showRemotePanel = true;
+      });
+
+      Row() {
+        Column() {
+          Text('鸿蒙流转 / DLNA')
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(UI.textPrimary)
+            .width('100%');
+          Text('优先使用系统流转，特殊设备再用 DLNA 搜索')
+            .fontSize(12)
+            .fontColor(UI.textSecondary)
+            .width('100%')
+            .margin({ top: 3 });
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start);
+        Text('›')
+          .fontSize(24)
+          .fontColor(UI.textSecondary);
+      }
+      .width('100%')
+      .padding({ left: 12, right: 12, top: 12, bottom: 12 })
+      .backgroundColor(UI.softBg)
+      .borderRadius(UI_RADIUS.control)
+      .onClick(() => {
+        this.showCastingPanel = true;
+        this.refreshDlnaStatus(false);
+        this.startDlnaPolling();
+      });
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .margin({ bottom: 14 });
+  }
+
+  @Builder
+  HomeFoldersBuilder() {
+    Column() {
+      Row() {
+        Text('播放列表')
+          .fontSize(18)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(UI.textPrimary)
+          .layoutWeight(1);
+        Button('扫描')
+          .fontSize(12)
+          .height(32)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.importSelectedVideoFiles();
+          });
+        Button('重扫')
+          .fontSize(12)
+          .height(32)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.rescanTrackedLibraryRoots();
+          });
+      }
+      .width('100%')
+      .margin({ bottom: 10 });
+
+      if (this.folderNames.length <= 1) {
+        Column() {
+          Text('还没有片单')
+            .fontSize(16)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(UI.textPrimary)
+            .width('100%')
+            .margin({ bottom: 6 });
+          Text('扫描播放列表会导入可读视频，并把无法读取的文件列出来。')
+            .fontSize(13)
+            .fontColor(UI.textSecondary)
+            .width('100%')
+            .margin({ bottom: 12 });
+          Row() {
+            Button('扫描播放列表')
+              .fontSize(14)
+              .height(38)
+              .layoutWeight(1)
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.brand)
+              .fontColor(Color.White)
+              .onClick(() => {
+                this.importSelectedVideoFiles();
+              });
+            Button('选文件夹')
+              .fontSize(14)
+              .height(38)
+              .layoutWeight(1)
+              .margin({ left: 10 })
+              .borderRadius(UI_RADIUS.control)
+              .backgroundColor(UI.softBg2)
+              .fontColor(UI.textPrimary)
+              .onClick(() => {
+                this.importMediaLibrary();
+              });
+          }
+          .width('100%');
+        }
+        .width('100%')
+        .padding(14)
+        .backgroundColor(UI.softBg)
+        .borderRadius(UI_RADIUS.control);
+      } else {
+        List({ space: 8 }) {
+          ForEach(this.folderNames, (folderName: string) => {
+            ListItem() {
+              Row() {
+                Text(folderName)
+                  .fontSize(15)
+                  .fontColor(UI.textPrimary)
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis });
+                Text(this.selectedFolderName === folderName ? '当前片单' : '播放')
+                  .fontSize(12)
+                  .fontColor(this.selectedFolderName === folderName ? UI.brand : UI.textSecondary);
+              }
+              .width('100%')
+              .padding({ left: 12, right: 12, top: 12, bottom: 12 })
+              .backgroundColor(this.selectedFolderName === folderName ? '#E8F4FF' : UI.softBg)
+              .borderRadius(UI_RADIUS.control)
+              .onClick(() => {
+                this.playFolderAsPlaylist(folderName);
+              });
+            }
+          }, (folderName: string) => folderName);
+        }
+        .width('100%')
+        .height(300);
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .margin({ bottom: 14 });
+  }
+
+  @Builder
+  HomePlaybackBuilder() {
+    Column() {
+      Text('播放设置')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(UI.textPrimary)
+        .width('100%')
+        .margin({ bottom: 10 });
+
+      Row() {
+        Button(this.isLandscapeMode ? '竖屏' : '横屏')
+          .fontSize(13)
+          .height(36)
+          .layoutWeight(1)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.toggleOrientation();
+          });
+        Button(`画面${this.getScaleModeLabel()}`)
+          .fontSize(13)
+          .height(36)
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.cycleFitMode();
+          });
+        Button('字幕/音轨')
+          .fontSize(13)
+          .height(36)
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.showTrackPanel = true;
+          });
+      }
+      .width('100%')
+      .margin({ bottom: 10 });
+
+      Row() {
+        Button('自动')
+          .fontSize(12)
+          .height(34)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.kernelSelectionPolicy === 'auto' ? UI.brand : UI.softBg2)
+          .fontColor(this.kernelSelectionPolicy === 'auto' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.switchKernel('auto');
+          });
+        Text(this.getKernelStatusText())
+          .fontSize(12)
+          .fontColor(UI.textSecondary)
+          .margin({ left: 10 })
+          .layoutWeight(1);
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .margin({ bottom: 8 });
+
+      Row() {
+        Button('ArkUI')
+          .fontSize(12)
+          .height(34)
+          .layoutWeight(1)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.playerKernelMode === 'video-component' ? UI.brand : UI.softBg2)
+          .fontColor(this.playerKernelMode === 'video-component' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.switchKernel('video-component');
+          });
+        Button('AVPlayer')
+          .fontSize(12)
+          .height(34)
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.playerKernelMode === 'avplayer-native' ? UI.brand : UI.softBg2)
+          .fontColor(this.playerKernelMode === 'avplayer-native' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.switchKernel('avplayer-native');
+          });
+        Button('Native')
+          .fontSize(12)
+          .height(34)
+          .layoutWeight(1)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(this.playerKernelMode === 'native-bridge' ? UI.brand : UI.softBg2)
+          .fontColor(this.playerKernelMode === 'native-bridge' ? Color.White : UI.textPrimary)
+          .onClick(() => {
+            this.switchKernel('native-bridge');
+          });
+      }
+      .width('100%')
+      .margin({ bottom: 12 });
+
+      Button('媒体信息与调试状态')
+        .fontSize(13)
+        .height(36)
+        .width('100%')
+        .borderRadius(UI_RADIUS.control)
+        .backgroundColor(UI.softBg2)
+        .fontColor(UI.textPrimary)
+        .onClick(() => {
+          this.showMediaInfo = true;
+        });
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .margin({ bottom: 14 });
+  }
+
+  @Builder
+  HomeMiniPlayerBuilder() {
+    Column() {
+      if (this.currentMediaItem) {
+        Row() {
+          Column() {
+            Text(this.currentMediaItem.title)
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(UI.textPrimary)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%');
+            Text(this.getPlaybackStatusText())
+              .fontSize(12)
+              .fontColor(this.isPlaying ? UI.brand : UI.textSecondary)
+              .width('100%')
+              .margin({ top: 3 });
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start);
+
+          Button(this.currentMediaItem?.isFavorite ? '★' : '☆')
+            .width(34)
+            .height(34)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(this.currentMediaItem?.isFavorite ? '#F59E0B' : UI.textSecondary)
+            .onClick(() => {
+              if (this.currentMediaItem) {
+                this.toggleFavorite(this.currentMediaItem);
+              }
+            });
+        }
+        .width('100%')
+        .margin({ bottom: 10 });
+      }
+
+      Row() {
+        Text(this.formatTime(this.currentTime))
+          .fontSize(12)
+          .fontColor(UI.textSecondary)
+          .width(46);
+        Slider({
+          value: this.currentTime,
+          min: 0,
+          max: this.duration > 0 ? this.duration : 1,
+          step: 1,
+          style: SliderStyle.OutSet
+        })
+          .layoutWeight(1)
+          .enabled(this.isPrepared)
+          .blockColor(UI.brand)
+          .trackColor('#D1D5DB')
+          .selectedColor(UI.brandStrong)
+          .onChange((value: number) => {
+            this.onSliderChange(value);
+          })
+          .onTouch((event: TouchEvent) => {
+            this.onSliderTouch(event);
+          });
+        Text(this.formatTime(this.duration))
+          .fontSize(12)
+          .fontColor(UI.textSecondary)
+          .textAlign(TextAlign.End)
+          .width(46);
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .margin({ bottom: 10 });
+
+      Row() {
+        Button('|<')
+          .width(48)
+          .height(36)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .enabled(this.playlistItems.length > 1)
+          .onClick(() => {
+            this.playPrevious();
+          });
+
+        Button(this.isPlaying ? '暂停' : '播放')
+          .height(36)
+          .layoutWeight(1)
+          .margin({ left: 8, right: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.brand)
+          .fontColor(Color.White)
+          .enabled(this.isPrepared)
+          .onClick(() => {
+            this.togglePlay();
+          });
+
+        Button('>|')
+          .width(48)
+          .height(36)
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .enabled(this.playlistItems.length > 1)
+          .onClick(() => {
+            this.playNext();
+          });
+
+        Button(`${this.currentSpeed}x`)
+          .width(62)
+          .height(36)
+          .margin({ left: 8 })
+          .borderRadius(UI_RADIUS.control)
+          .backgroundColor(UI.softBg2)
+          .fontColor(UI.textPrimary)
+          .onClick(() => {
+            this.showSpeedPicker = true;
+          });
+      }
+      .width('100%');
+
+      if (this.hasPlayableError) {
+        Row() {
+          Button('重试')
+            .height(34)
+            .layoutWeight(1)
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
+            .onClick(() => {
+              this.retryCurrent();
+            });
+          Button('重新选择')
+            .height(34)
+            .layoutWeight(1)
+            .margin({ left: 8 })
+            .borderRadius(UI_RADIUS.control)
+            .backgroundColor(UI.softBg2)
+            .fontColor(UI.textPrimary)
+            .onClick(() => {
+              this.selectVideo();
+            });
+        }
+        .width('100%')
+        .margin({ top: 10 });
+      }
+    }
+    .width('100%')
+    .padding(12)
+    .backgroundColor('#F8FAFC')
+    .borderRadius(UI_RADIUS.control);
   }
 
   @Builder
@@ -4043,14 +4718,21 @@ struct Index {
   @Builder
   CastingPanelBuilder() {
     Column() {
-      Text('DLNA 投屏')
+      Text('系统投播 / DLNA')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
         .margin({ top: 20, bottom: 16 });
 
       Row() {
+        Button('鸿蒙投播')
+          .fontSize(14)
+          .onClick(() => {
+            this.openSystemCastPicker();
+          });
+
         Button(this.dlnaLoading ? '搜索中' : '搜索设备')
           .fontSize(14)
+          .margin({ left: 10 })
           .enabled(!this.dlnaLoading)
           .onClick(() => {
             this.discoverDlnaDevices();

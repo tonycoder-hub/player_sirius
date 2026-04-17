@@ -41,6 +41,11 @@ export class PlayerService {
     return this.playlist;
   }
 
+  setPlaylist(items: MediaItem[], currentIndex: number = 0): MediaItem | null {
+    this.playlist.setItems(items, currentIndex);
+    return this.playlist.getCurrentItem();
+  }
+
   getCurrentItem(): MediaItem | null {
     return this.playlist.getCurrentItem();
   }

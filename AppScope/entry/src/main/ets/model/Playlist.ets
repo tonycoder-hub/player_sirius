@@ -23,6 +23,15 @@ export class Playlist {
     this.items.push(item);
   }
 
+  setItems(items: MediaItem[], currentIndex: number = 0): void {
+    this.items = [...items];
+    if (this.items.length === 0) {
+      this.currentIndex = -1;
+      return;
+    }
+    this.currentIndex = Math.max(0, Math.min(currentIndex, this.items.length - 1));
+  }
+
   findIndexByUri(uri: string): number {
     return this.items.findIndex((item: MediaItem) => item.uri === uri);
   }

@@ -61,20 +61,28 @@ export class DlnaService {
 
     const searchTargets = [
       'urn:schemas-upnp-org:device:MediaRenderer:1',
+      'urn:schemas-upnp-org:service:AVTransport:1',
+      'urn:schemas-upnp-org:service:RenderingControl:1',
+      'ssdp:all',
       'upnp:rootdevice'
     ];
 
-    for (const st of searchTargets) {
-      const payload =
-        'M-SEARCH * HTTP/1.1\r\n' +
-        'HOST: 239.255.255.250:1900\r\n' +
-        'MAN: "ssdp:discover"\r\n' +
-        'MX: 2\r\n' +
-        `ST: ${st}\r\n` +
-        '\r\n';
-      await udp.send({
-        data: payload,
-        address: { address: '239.255.255.250', port: 1900, family: 1 }
+    for (let round = 0; round < 2; round++) {
+      for (const st of searchTargets) {
+        const payload =
+          'M-SEARCH * HTTP/1.1\r\n' +
+          'HOST: 239.255.255.250:1900\r\n' +
+          'MAN: "ssdp:discover"\r\n' +
+          'MX: 2\r\n' +
+          `ST: ${st}\r\n` +
+          '\r\n';
+        await udp.send({
+          data: payload,
+          address: { address: '239.255.255.250', port: 1900, family: 1 }
+        });
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(() => resolve(), 200);
       });
     }
 

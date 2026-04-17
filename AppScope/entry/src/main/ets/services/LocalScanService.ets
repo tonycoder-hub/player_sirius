@@ -6,6 +6,9 @@ export interface ScanResult {
   uris: string[];
   message: string;
   rootUri?: string;
+  scannedCount?: number;
+  skippedCount?: number;
+  failedUris?: string[];
 }
 
 export class LocalScanService {
@@ -38,7 +41,14 @@ export class LocalScanService {
       }
 
       const uris = await LocalScanService.listFilesByExtensions(folderUri, ['.mp4', '.mkv', '.avi', '.mov', '.m3u8', '.flv'], maxCount);
-      return { uris, message: `已扫描到 ${uris.length} 个媒体文件`, rootUri: folderUri };
+      return {
+        uris,
+        message: `扫描播放列表已导入 ${uris.length} 个视频${uris.length >= maxCount ? `，已达到上限 ${maxCount}` : ''}`,
+        rootUri: folderUri,
+        scannedCount: uris.length,
+        skippedCount: 0,
+        failedUris: []
+      };
     } catch (err) {
       const error = err as BusinessError;
       return { uris: [], message: `扫描失败：${error.message ?? `${err}`}` };
@@ -61,36 +71,42 @@ export class LocalScanService {
 
   private static async listFilesByExtensions(folderUri: string, exts: string[], maxCount: number): Promise<string[]> {
     // NOTE: FileKit folder enumeration APIs vary by API versions; we implement best-effort:
-    // - If folderUri is a local path-like URI that fs.listFile can read, use it.
-    // - Otherwise return empty so caller can fallback.
+    // - Prefer listing the selected folder URI itself.
+    // - Fall back to a FileUri directory form for path-like URIs.
     const normalizedExts = exts.map((e: string) => e.toLowerCase());
-    const candidates: string[] = [];
-
-    try {
-      const stat = fs.statSync(folderUri);
-      void stat;
-    } catch {
-      return [];
+    const direct = await LocalScanService.tryListFilesByExtensions(folderUri, normalizedExts, maxCount);
+    if (direct.length > 0) {
+      return direct;
     }
 
     try {
-      const baseDirectoryUri = new fileUri.FileUri(folderUri).getFullDirectoryUri();
-      const names = await fs.listFile(baseDirectoryUri, { recursion: true });
+      const fallbackDirectoryUri = new fileUri.FileUri(folderUri).getFullDirectoryUri();
+      return await LocalScanService.tryListFilesByExtensions(fallbackDirectoryUri, normalizedExts, maxCount);
+    } catch {
+      return [];
+    }
+  }
+
+  private static async tryListFilesByExtensions(baseUri: string, normalizedExts: string[], maxCount: number): Promise<string[]> {
+    const candidates: string[] = [];
+    try {
+      const names = await fs.listFile(baseUri, { recursion: true });
       for (const rel of names) {
         if (candidates.length >= maxCount) {
           break;
         }
-        const lower = rel.toLowerCase();
+        const relativePath = `${rel}`;
+        const lower = relativePath.toLowerCase();
         const hit = normalizedExts.some((ext: string) => lower.endsWith(ext));
         if (!hit) {
           continue;
         }
-        candidates.push(LocalScanService.joinUri(baseDirectoryUri, rel));
+        candidates.push(LocalScanService.joinUri(baseUri, relativePath));
       }
-      return candidates;
     } catch {
       return [];
     }
+    return candidates;
   }
 
   private static joinUri(baseUri: string, relativePath: string): string {
