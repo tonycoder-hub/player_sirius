@@ -3,5 +3,6 @@
 hvigor/
 build/
 AppScope/entry/build/
+AppScope/entry/.preview/
 local.properties
 .idea/

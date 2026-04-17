@@ -193,7 +193,7 @@ export class SmbService {
     const normalized = this.sanitizeProfile(profile);
     const path = this.normalizePath(targetPath ?? normalized.path);
     const auth = normalized.username.length > 0
-      ? `${encodeURIComponent(normalized.username)}${normalized.password.length > 0 ? `:${encodeURIComponent(normalized.password)}` : ''}@`
+      ? `${encodeURIComponent(normalized.username)}@`
       : '';
     const port = normalized.port !== 445 ? `:${normalized.port}` : '';
     return `smb://${auth}${normalized.host}${port}/${normalized.share}${path}`;
